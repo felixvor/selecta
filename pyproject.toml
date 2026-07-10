@@ -1,0 +1,30 @@
+[project]
+name = "selecta"
+version = "0.1.0"
+description = "Terminal-Helper zum Auflegen: findet den passendsten naechsten Track ueber Audio-Embeddings"
+requires-python = ">=3.11"
+dependencies = [
+    "essentia-tensorflow==2.1b6.dev1438",
+    "mutagen==1.48.1",
+    "numpy==2.5.1",
+    "textual==8.2.8",
+    "rapidfuzz==3.14.5",
+    "tqdm==4.68.4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1", "pytest-asyncio==1.4.0"]
+
+[project.scripts]
+selecta = "selecta.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["selecta"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
