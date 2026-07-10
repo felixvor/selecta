@@ -716,6 +716,39 @@ class PathSuggester(Suggester):
         return str(parent / matches[0])
 
 
+class PathInput(Input):
+    """Input mit Tab-Vervollstaendigung wie in einer normalen Konsole --
+    Textual bindet die Ghost-Text-Uebernahme sonst nur an Rechts-Pfeil/Ende,
+    nicht an Tab (das navigiert normalerweise den Fokus weiter)."""
+
+    BINDINGS = [Binding("tab", "accept_suggestion", "Vervollstaendigen", show=False)]
+
+    def action_accept_suggestion(self) -> None:
+        if self.cursor_at_end and self._suggestion:
+            self.value = self._suggestion
+            self.cursor_position = len(self.value)
+        else:
+            self.screen.focus_next()
+
+
+LAST_DIR_FILE = Path.home() / ".local" / "share" / "selecta" / "last_dir"
+
+
+def load_last_dir() -> str:
+    try:
+        return LAST_DIR_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def save_last_dir(music_dir: Path) -> None:
+    try:
+        LAST_DIR_FILE.parent.mkdir(parents=True, exist_ok=True)
+        LAST_DIR_FILE.write_text(str(music_dir), encoding="utf-8")
+    except OSError:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Ordner-Abfrage beim Start ohne Argument
 # ---------------------------------------------------------------------------
@@ -724,8 +757,13 @@ class DirScreen(Screen):
     def compose(self) -> ComposeResult:
         with Vertical(id="dir-box"):
             yield Static(Text(LOGO, style="bold magenta"))
-            yield Static("Musik-Ordner eingeben (Windows- oder /mnt-Pfad, → vervollstaendigt):")
-            yield Input(placeholder="/mnt/g/Media/Musik/…", id="dir-input", suggester=PathSuggester())
+            yield Static("Musik-Ordner eingeben (Windows- oder /mnt-Pfad, Tab/→ vervollstaendigt):")
+            yield PathInput(
+                value=load_last_dir(),
+                placeholder="/mnt/g/Media/Musik/…",
+                id="dir-input",
+                suggester=PathSuggester(),
+            )
             yield Static(id="dir-error", markup=True)
 
     def on_mount(self) -> None:
@@ -857,6 +895,7 @@ class SelectaApp(App):
 
     def open_library(self, music_dir: Path) -> None:
         self.library = Library(music_dir)
+        save_last_dir(music_dir)
         if isinstance(self.screen, DirScreen):
             self.pop_screen()
         self.push_screen(MainScreen())
