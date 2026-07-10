@@ -128,6 +128,26 @@ def download_models(models_dir: Path, log=print):
             )
 
 
+def compute_bpm(filepath: Path) -> str:
+    """BPM selbst berechnen (RhythmExtractor2013 -- schneller Standard-
+    algorithmus, kein TensorFlow-Modell noetig). Eigener 44.1kHz-Load, weil
+    die Embedding-Modelle mit 16kHz arbeiten, RhythmExtractor2013 aber die
+    volle Samplerate braucht.
+
+    Kein Key-Pendant hier bewusst: Essentias KeyExtractor liegt gegen 41
+    Rekordbox-getaggte Referenztracks bei 85% exakt einen Halbton daneben --
+    quer durch alle Tonart-Profile (bgate/edma/edmm/temperley/krumhansl/
+    shaath). BPM stimmt dagegen im Schnitt auf 0.09 BPM genau. Ein falsch
+    geschaetzter Key sieht in der Liste wie ein echter aus und kann beim
+    harmonischen Mixen crashen -- lieber "?" als eine Zahl, der man nicht
+    ansieht, dass sie ratet."""
+    from essentia.standard import MonoLoader, RhythmExtractor2013
+
+    audio = MonoLoader(filename=str(filepath))()
+    bpm, _ticks, _confidence, _estimates, _intervals = RhythmExtractor2013(method="multifeature")(audio)
+    return f"{bpm:.1f}"
+
+
 class EssentiaAnalyzer:
     def __init__(self, models_dir: Path):
         from essentia.standard import (
@@ -192,8 +212,33 @@ class EssentiaAnalyzer:
         }
 
 
+def _missing_parts(row: dict | None) -> set:
+    """Was fehlt einer CSV-Zeile noch? 'embedding' = volle Analyse noetig
+    (teuer, TensorFlow-Modelle), 'tags' = BPM evtl. nachtragbar (billig,
+    kein Modell). status='ok' + Embedding vorhanden ist bisher in der Praxis
+    immer deckungsgleich -- beide werden nur bei Erfolg bzw. beide leer bei
+    Fehler gesetzt (siehe Except-Zweig unten).
+
+    Nur BPM triggert 'tags', nicht Key: Key wird nie selbst berechnet (siehe
+    compute_bpm-Docstring), eine Zeile ohne Key-Tag waere sonst fuer immer
+    'offen' und wuerde bei jedem Ctrl+A erneut angefasst, ohne je fertig zu
+    werden. Sobald BPM einmal gesetzt ist, ist die Zeile endgueltig fertig --
+    Key wird dabei nur "kostenlos" mitgenommen, falls der Tag inzwischen da
+    ist, aber nicht eigens dafuer nachverfolgt."""
+    if row is None or row.get("status") != "ok" or not row.get("embedding"):
+        return {"embedding"}
+    if not row.get("bpm"):
+        return {"tags"}
+    return set()
+
+
 def run_analysis(music_dir, models_dir, log=print, progress=None, cancelled=None):
     """Analysiert alle Audiodateien in music_dir (Resume ueber die CSV).
+
+    Pro Datei wird nur nachgeholt, was in der CSV tatsaechlich fehlt --
+    fehlt das Similarity-Embedding, laeuft die volle (teure) Analyse;
+    fehlen nur BPM/Key (kein Tag in der Datei), reicht der billige
+    Rhythm-/KeyExtractor-Durchlauf ohne TensorFlow-Modelle.
 
     log(msg): Textzeile fuer die Ausgabe.
     progress(done, total): Fortschritt ueber alle Dateien.
@@ -208,30 +253,25 @@ def run_analysis(music_dir, models_dir, log=print, progress=None, cancelled=None
     if not music_dir.exists():
         raise RuntimeError(f"Musikordner nicht gefunden: {music_dir}")
 
-    download_models(models_dir, log=log)
-
     all_files = find_audio_files(music_dir)
     log(f"{len(all_files)} Audiodateien in {music_dir}")
 
     csv_data = load_csv_data(csv_path)
     compact_csv(csv_path, csv_data, prune_missing=True)
 
-    def needs_analysis(filepath_str):
-        values = csv_data.get(filepath_str)
-        if values is None:
-            return True
-        # Backfill: alte Zeilen ohne Similarity-Embedding neu analysieren.
-        return values.get("status") == "ok" and not values.get("embedding")
-
-    todo = [f for f in all_files if needs_analysis(str(f))]
-    log(f"{len(all_files) - len(todo)} bereits analysiert, {len(todo)} offen.")
+    todo = [(f, _missing_parts(csv_data.get(str(f)))) for f in all_files]
+    todo = [(f, missing) for f, missing in todo if missing]
+    log(f"{len(all_files) - len(todo)} bereits vollstaendig, {len(todo)} offen.")
     if progress:
         progress(0, len(todo))
     if not todo:
         return 0, 0
 
-    log("Lade Essentia-Modelle (einmalig pro Lauf) ...")
-    analyzer = EssentiaAnalyzer(models_dir)
+    analyzer = None
+    if any("embedding" in missing for _, missing in todo):
+        download_models(models_dir, log=log)
+        log("Lade Essentia-Modelle (einmalig pro Lauf) ...")
+        analyzer = EssentiaAnalyzer(models_dir)
 
     done = 0
     errors = 0
@@ -241,27 +281,48 @@ def run_analysis(music_dir, models_dir, log=print, progress=None, cancelled=None
         if not csv_exists:
             writer.writeheader()
 
-        for filepath in todo:
+        for filepath, missing in todo:
             if cancelled and cancelled():
                 log("Abgebrochen -- bereits analysierte Tracks sind gespeichert.")
                 break
 
             t0 = time.time()
-            row = {"filepath": str(filepath)}
-            row.update(read_existing_tags(filepath))
-            try:
-                values = analyzer.analyze(filepath)
-                row.update(values)
-                row["status"] = "ok"
-                dt = time.time() - t0
-                log(f"{filepath.name}  ({dt:.1f}s)")
-            except Exception as e:
-                row = {k: "" for k in CSV_FIELDNAMES}
-                row["filepath"] = str(filepath)
-                row["status"] = f"error: {e}"
-                errors += 1
-                log(f"FEHLER bei {filepath.name}: {e}")
+            existing = csv_data.get(str(filepath)) or {}
+            row = {"filepath": str(filepath), **{k: existing.get(k, "") for k in CSV_FIELDNAMES[1:]}}
 
+            if "embedding" in missing:
+                try:
+                    row.update(read_existing_tags(filepath))
+                    row.update(analyzer.analyze(filepath))
+                    row["status"] = "ok"
+                except Exception as e:
+                    row = {k: "" for k in CSV_FIELDNAMES}
+                    row["filepath"] = str(filepath)
+                    row["status"] = f"error: {e}"
+                    errors += 1
+                    log(f"FEHLER bei {filepath.name}: {e}")
+                    writer.writerow(row)
+                    f.flush()
+                    done += 1
+                    if progress:
+                        progress(done, len(todo))
+                    continue
+
+            if "embedding" not in missing and (not row.get("bpm") or not row.get("key")):
+                # Tag ggf. zwischenzeitlich per Traktor/Rekordbox gesetzt --
+                # billiger Re-Check vor jedem Fallback-Versuch.
+                fresh_tags = read_existing_tags(filepath)
+                row["bpm"] = row.get("bpm") or fresh_tags.get("bpm", "")
+                row["key"] = row.get("key") or fresh_tags.get("key", "")
+
+            if not row.get("bpm"):
+                try:
+                    row["bpm"] = compute_bpm(filepath)
+                except Exception as e:
+                    log(f"BPM nicht ermittelbar bei {filepath.name}: {e}")
+
+            dt = time.time() - t0
+            log(f"{filepath.name}  ({dt:.1f}s)")
             writer.writerow(row)
             f.flush()
             done += 1
