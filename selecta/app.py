@@ -11,6 +11,8 @@ Bedienlogik MainScreen (fzf-Stil: Suche haelt den Fokus, Aktionen auf Chords):
 """
 
 import asyncio
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -21,6 +23,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
+from textual.suggester import Suggester
 from textual.widgets import DataTable, Input, ProgressBar, RichLog, Select, Static
 
 from .config import (
@@ -668,6 +671,51 @@ class TransitionScreen(Screen):
         self.dismiss(None)
 
 
+def resolve_music_dir(raw: str) -> Path:
+    """Windows-Pfade (C:\\... oder C:/...) via wslpath nach /mnt/... uebersetzen,
+    z.B. beim Eintippen im DirScreen-Prompt. Alles andere (/mnt/..., ~, relative
+    Pfade) bleibt unveraendert -- WSL kennt kein C:\\, die App laeuft dort drin."""
+    raw = raw.strip()
+    if re.match(r"^[A-Za-z]:[\\/]", raw):
+        try:
+            converted = subprocess.run(
+                ["wslpath", "-a", raw], capture_output=True, text=True, check=True
+            ).stdout.strip()
+            if converted:
+                return Path(converted)
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+            pass
+    return Path(raw).expanduser()
+
+
+class PathSuggester(Suggester):
+    """Ghost-Text-Vervollstaendigung fuer Ordnerpfade (naechster passender
+    Unterordner, alphabetisch erster Treffer -- Rechts/End uebernimmt ihn)."""
+
+    def __init__(self) -> None:
+        super().__init__(use_cache=False, case_sensitive=True)
+
+    async def get_suggestion(self, value: str) -> str | None:
+        value = value.strip()
+        if not value:
+            return None
+        path = resolve_music_dir(value)
+        parent, partial = (path, "") if value.endswith(("/", "\\")) else (path.parent, path.name)
+        try:
+            if not parent.is_dir():
+                return None
+            matches = sorted(
+                p.name
+                for p in parent.iterdir()
+                if p.is_dir() and not p.name.startswith(".") and p.name.startswith(partial)
+            )
+        except OSError:
+            return None
+        if not matches:
+            return None
+        return str(parent / matches[0])
+
+
 # ---------------------------------------------------------------------------
 # Ordner-Abfrage beim Start ohne Argument
 # ---------------------------------------------------------------------------
@@ -676,8 +724,8 @@ class DirScreen(Screen):
     def compose(self) -> ComposeResult:
         with Vertical(id="dir-box"):
             yield Static(Text(LOGO, style="bold magenta"))
-            yield Static("Musik-Ordner eingeben:")
-            yield Input(placeholder="/mnt/g/Media/Musik/…", id="dir-input")
+            yield Static("Musik-Ordner eingeben (Windows- oder /mnt-Pfad, → vervollstaendigt):")
+            yield Input(placeholder="/mnt/g/Media/Musik/…", id="dir-input", suggester=PathSuggester())
             yield Static(id="dir-error", markup=True)
 
     def on_mount(self) -> None:
@@ -685,7 +733,7 @@ class DirScreen(Screen):
 
     @on(Input.Submitted)
     def _on_submitted(self, event: Input.Submitted) -> None:
-        path = Path(event.value.strip()).expanduser()
+        path = resolve_music_dir(event.value)
         if path.is_dir():
             self.app.open_library(path)
         else:
