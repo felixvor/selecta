@@ -6,8 +6,10 @@ trainiert), re-ranked nach BPM, Key und Mood.
 
 ## Voraussetzungen
 
-Python 3.11+. `essentia-tensorflow` gibt es nur als Linux-Wheel — auf macOS
-läuft SELECTA daher nicht, unter Windows über WSL2 (siehe unten).
+Python 3.14 (exakt diese Version — `essentia-tensorflow` ist nur als
+Python-3.14-Wheel gepinnt). `essentia-tensorflow` gibt es nur als
+Linux-Wheel — auf macOS läuft SELECTA daher nicht, unter Windows über
+WSL2 (siehe unten).
 
 ## Setup (Linux / WSL)
 
@@ -20,7 +22,9 @@ pip install -e .
 
 ## Setup (Windows über WSL2)
 
-Einmalig WSL2 mit einer Ubuntu-Distro installieren (`wsl --install -d Ubuntu-22.04`).
+Einmalig WSL2 mit Ubuntu installieren (`wsl --install -d Ubuntu`, aktuelles LTS —
+**nicht** eine ältere Versionsnummer fest angeben, die bringt Python 3.10/3.12
+statt der benötigten 3.14 mit).
 Danach diesen Ordner (z.B. per USB-Stick) irgendwohin kopieren und `Selecta.bat`
 doppelklicken — richtet beim ersten Start automatisch venv + Abhängigkeiten in
 WSL ein (`setup.sh`) und startet danach die TUI. Ein Ordner lässt sich auch

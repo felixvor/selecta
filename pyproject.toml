@@ -2,7 +2,7 @@
 name = "selecta"
 version = "0.1.0"
 description = "Terminal-Helper zum Auflegen: findet den passendsten naechsten Track ueber Audio-Embeddings"
-requires-python = ">=3.11"
+requires-python = ">=3.14,<3.15"
 dependencies = [
     "essentia-tensorflow==2.1b6.dev1438",
     "mutagen==1.48.1",

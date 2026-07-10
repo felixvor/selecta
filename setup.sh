@@ -8,6 +8,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$HOME/.local/share/selecta/venv"
 
+if ! python3 --version 2>&1 | grep -q "Python 3\.14\."; then
+    echo "Fehler: Python 3.14 wird benoetigt (essentia-tensorflow gibt es nur dafuer)." >&2
+    echo "Gefunden: $(python3 --version 2>&1)" >&2
+    echo "Fix: WSL-Distro auf aktuelles Ubuntu-LTS aktualisieren (wsl --install -d Ubuntu)." >&2
+    exit 1
+fi
+
 if [ ! -d "$VENV_DIR" ]; then
     echo "Lege venv an: $VENV_DIR"
     python3 -m venv "$VENV_DIR"
