@@ -2,7 +2,7 @@
 
 import pytest
 
-from selecta.app import MainScreen, ResultsTable, SearchInput, SelectaApp, TransitionScreen
+from selecta.app import MainScreen, ResultsTable, SearchInput, SelectaApp
 
 
 @pytest.fixture
@@ -54,18 +54,26 @@ async def test_energie_taste_rerankt(app):
         pushed_order = [t["filepath"] for t in screen._row_tracks]
         assert neutral_order.index("house_fast.mp3") > pushed_order.index("house_fast.mp3")
         # Grenze haelt
-        await pilot.press("right")
-        assert screen.energy == 3
+        await pilot.press("right", "right", "right", "right")
+        assert screen.energy == 6
 
 
-async def test_bpm_feintuning_keys(app):
+async def test_bpm_filter_springt_auf_naechsten_track(app):
+    """',' / '.' springen exakt auf den naechsten in der Library
+    vorhandenen BPM-Wert -- kein fixer Schritt, kein Ueberspringen."""
     async with app.run_test(size=(120, 40)) as pilot:
         screen = app.screen
-        await pilot.press(*"groove a", "enter")
+        await pilot.press(*"groove a", "enter")  # Query = house_a, 124 BPM
         await pilot.press("full_stop")
-        assert screen.bpm_offset == 4
+        assert screen.bpm_offset == 2  # naechster schnellerer Track: house_b (126)
+        await pilot.press("full_stop")
+        assert screen.bpm_offset == 8  # naechster: house_fast (132)
+        await pilot.press("comma")
+        assert screen.bpm_offset == 2  # zurueck auf 126 (Filter lockern)
         await pilot.press("comma", "comma")
-        assert screen.bpm_offset == -4
+        assert screen.bpm_offset == -44  # via house_slow (118) weiter zu ambient (80)
+        await pilot.press("comma")
+        assert screen.bpm_offset == -44  # unterer Rand erreicht -- bleibt stehen
 
 
 async def test_buchstaben_tippen_immer(app):
@@ -97,31 +105,59 @@ async def test_escape_leert_suche(app):
         assert screen._results_shown  # zurueck bei den Ergebnissen
 
 
-async def test_transition_screen_flow(app):
+async def test_transition_ziel_pinnen_und_re_anchor(app):
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = app.screen
+        await pilot.press(*"groove a", "enter")   # A = house_a
+        await pilot.press("ctrl+t")
+        assert screen._selecting_target
+        await pilot.press(*"hammer", "enter")     # B = techno
+        assert not screen._selecting_target
+        assert screen.transition_target["title"] == "Hammer"
+        table = screen.query_one(ResultsTable)
+        assert table.row_count == 5               # alle ausser A, inkl. B
+        # Enter auf den Top-Kandidaten: wird neues A, Ziel bleibt gepinnt
+        await pilot.press("enter")
+        assert screen.transition_target is not None
+        assert screen.query_track["filepath"] != "house_a.mp3"
+
+
+async def test_transition_ziel_waehlen_beendet_modus(app):
     async with app.run_test(size=(120, 40)) as pilot:
         screen = app.screen
         await pilot.press(*"groove a", "enter")
         await pilot.press("ctrl+t")
-        assert isinstance(app.screen, TransitionScreen)
-        # A ist mit der aktuellen Query vorbelegt, B eingeben:
         await pilot.press(*"hammer", "enter")
-        tscreen = app.screen
-        table = tscreen.query_one("#transition-table", ResultsTable)
-        assert table.row_count >= 3  # A + mindestens 1 + B
-        assert tscreen._row_tracks[0]["title"] == "Groove A"
-        assert tscreen._row_tracks[-1]["title"] == "Hammer"
-        # Zwischentrack uebernehmen -> zurueck in der Suche mit neuer Query
-        await pilot.press("down", "enter")
-        assert isinstance(app.screen, MainScreen)
-        assert app.screen.query_track["filepath"] == tscreen._row_tracks[1]["filepath"]
+        # B ueber die Suche direkt anspringen -> Transition fertig, B ist Query
+        await pilot.press(*"hammer", "enter")
+        assert screen.transition_target is None
+        assert screen.query_track["title"] == "Hammer"
 
 
-async def test_transition_esc_zurueck(app):
+async def test_transition_esc_schichten(app):
     async with app.run_test(size=(120, 40)) as pilot:
+        screen = app.screen
+        await pilot.press(*"groove a", "enter")
         await pilot.press("ctrl+t")
-        assert isinstance(app.screen, TransitionScreen)
-        await pilot.press("escape")
-        assert isinstance(app.screen, MainScreen)
+        await pilot.press("escape")               # bricht die Ziel-Auswahl ab
+        assert not screen._selecting_target
+        assert screen.transition_target is None
+        assert screen._results_shown
+        await pilot.press("ctrl+t")
+        await pilot.press(*"hammer", "enter")
+        await pilot.press("escape")               # loescht das gepinnte Ziel
+        assert screen.transition_target is None
+        assert screen._results_shown
+
+
+async def test_transition_energie_inaktiv(app):
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = app.screen
+        await pilot.press(*"groove a", "enter")
+        await pilot.press("ctrl+t")
+        await pilot.press(*"hammer", "enter")
+        await pilot.press("right")
+        assert screen.energy == 0                 # Energie im Transition-Modus aus
 
 
 async def test_analyze_modal_bestaetigung_esc_startet_nichts(app):

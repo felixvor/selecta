@@ -7,7 +7,7 @@ from selecta.library import Library, compact_csv, encode_embedding
 def make_row(filepath, artist, title, bpm, key, emb, **mood):
     row = {
         "artist": artist, "title": title, "bpm": str(bpm), "key": key,
-        "status": "ok", "embedding": encode_embedding(np.array(emb, dtype=np.float32)),
+        "error": "", "embedding": encode_embedding(np.array(emb, dtype=np.float32)),
     }
     defaults = {
         "aggressive": 0.3, "happy": 0.1, "sad": 0.2, "relaxed": 0.8, "party": 0.2,

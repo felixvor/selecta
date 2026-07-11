@@ -215,9 +215,8 @@ class EssentiaAnalyzer:
 def _missing_parts(row: dict | None) -> set:
     """Was fehlt einer CSV-Zeile noch? 'embedding' = volle Analyse noetig
     (teuer, TensorFlow-Modelle), 'tags' = BPM evtl. nachtragbar (billig,
-    kein Modell). status='ok' + Embedding vorhanden ist bisher in der Praxis
-    immer deckungsgleich -- beide werden nur bei Erfolg bzw. beide leer bei
-    Fehler gesetzt (siehe Except-Zweig unten).
+    kein Modell). Massgeblich ist allein, ob ein Embedding vorhanden ist --
+    'error' ist reine Debug-Info und fliesst nicht in diese Entscheidung ein.
 
     Nur BPM triggert 'tags', nicht Key: Key wird nie selbst berechnet (siehe
     compute_bpm-Docstring), eine Zeile ohne Key-Tag waere sonst fuer immer
@@ -225,7 +224,7 @@ def _missing_parts(row: dict | None) -> set:
     werden. Sobald BPM einmal gesetzt ist, ist die Zeile endgueltig fertig --
     Key wird dabei nur "kostenlos" mitgenommen, falls der Tag inzwischen da
     ist, aber nicht eigens dafuer nachverfolgt."""
-    if row is None or row.get("status") != "ok" or not row.get("embedding"):
+    if row is None or not row.get("embedding"):
         return {"embedding"}
     if not row.get("bpm"):
         return {"tags"}
@@ -235,16 +234,24 @@ def _missing_parts(row: dict | None) -> set:
 def run_analysis(music_dir, models_dir, log=print, progress=None, cancelled=None):
     """Analysiert alle Audiodateien in music_dir (Resume ueber die CSV).
 
-    Pro Datei wird nur nachgeholt, was in der CSV tatsaechlich fehlt --
-    fehlt das Similarity-Embedding, laeuft die volle (teure) Analyse;
-    fehlen nur BPM/Key (kein Tag in der Datei), reicht der billige
-    Rhythm-/KeyExtractor-Durchlauf ohne TensorFlow-Modelle.
+    Jede Datei im Ordner wird durchlaufen und geloggt -- auch wenn sie
+    bereits vollstaendig ist, damit der Log/Fortschrittsbalken nie
+    kommentarlos bei "0 offen" stehen bleibt, sondern sichtbar durch die
+    ganze Library rattert. Nachgeholt wird pro Datei nur, was in der CSV
+    tatsaechlich fehlt: fehlt das Similarity-Embedding, laeuft die volle
+    (teure) Analyse; ansonsten reicht ein billiger Tag-Re-Check (BPM/Key aus
+    der Datei, z.B. von Rekordbox/Traktor gesetzt) plus Rhythm-Extractor-
+    Fallback ohne TensorFlow-Modelle. Der Tag-Re-Check laeuft bei JEDER
+    Datei, auch bereits vollstaendigen -- ein zwischenzeitlich in der Datei
+    gesetzter oder geaenderter Tag gilt als hochwertiger als unsere eigene
+    Schaetzung und ueberschreibt den CSV-Wert.
 
     log(msg): Textzeile fuer die Ausgabe.
-    progress(done, total): Fortschritt ueber alle Dateien.
+    progress(done, total): Fortschritt ueber alle Dateien im Ordner.
     cancelled(): True -> zwischen zwei Dateien sauber abbrechen.
 
-    Rueckgabe: (neu_analysiert, fehler).
+    Rueckgabe: (neu_analysiert, fehler) -- zaehlt nur Dateien, an denen
+    tatsaechlich etwas berechnet wurde, nicht die bereits vollstaendigen.
     """
     music_dir = Path(music_dir)
     models_dir = Path(models_dir)
@@ -260,12 +267,10 @@ def run_analysis(music_dir, models_dir, log=print, progress=None, cancelled=None
     compact_csv(csv_path, csv_data, prune_missing=True)
 
     todo = [(f, _missing_parts(csv_data.get(str(f)))) for f in all_files]
-    todo = [(f, missing) for f, missing in todo if missing]
-    log(f"{len(all_files) - len(todo)} bereits vollstaendig, {len(todo)} offen.")
+    open_count = sum(1 for _, missing in todo if missing)
+    log(f"{len(all_files) - open_count} bereits vollstaendig, {open_count} offen.")
     if progress:
-        progress(0, len(todo))
-    if not todo:
-        return 0, 0
+        progress(0, len(all_files))
 
     analyzer = None
     if any("embedding" in missing for _, missing in todo):
@@ -273,7 +278,8 @@ def run_analysis(music_dir, models_dir, log=print, progress=None, cancelled=None
         log("Lade Essentia-Modelle (einmalig pro Lauf) ...")
         analyzer = EssentiaAnalyzer(models_dir)
 
-    done = 0
+    scanned = 0
+    analyzed = 0
     errors = 0
     csv_exists = csv_path.exists()
     with open(csv_path, "a", encoding="utf-8", newline="") as f:
@@ -294,39 +300,62 @@ def run_analysis(music_dir, models_dir, log=print, progress=None, cancelled=None
                 try:
                     row.update(read_existing_tags(filepath))
                     row.update(analyzer.analyze(filepath))
-                    row["status"] = "ok"
+                    row["error"] = ""
                 except Exception as e:
                     row = {k: "" for k in CSV_FIELDNAMES}
                     row["filepath"] = str(filepath)
-                    row["status"] = f"error: {e}"
+                    row["error"] = str(e)
                     errors += 1
                     log(f"FEHLER bei {filepath.name}: {e}")
                     writer.writerow(row)
                     f.flush()
-                    done += 1
+                    scanned += 1
+                    analyzed += 1
                     if progress:
-                        progress(done, len(todo))
+                        progress(scanned, len(all_files))
                     continue
 
-            if "embedding" not in missing and (not row.get("bpm") or not row.get("key")):
-                # Tag ggf. zwischenzeitlich per Traktor/Rekordbox gesetzt --
-                # billiger Re-Check vor jedem Fallback-Versuch.
-                fresh_tags = read_existing_tags(filepath)
-                row["bpm"] = row.get("bpm") or fresh_tags.get("bpm", "")
-                row["key"] = row.get("key") or fresh_tags.get("key", "")
+                dt = time.time() - t0
+                log(f"{filepath.name}  ({dt:.1f}s)")
+                writer.writerow(row)
+                f.flush()
+                scanned += 1
+                analyzed += 1
+                if progress:
+                    progress(scanned, len(all_files))
+                continue
+
+            # Kein Embedding noetig -- trotzdem bei JEDER Datei pruefen, ob
+            # DJ-Software (Rekordbox/Traktor) inzwischen einen BPM/Key-Tag
+            # gesetzt oder geaendert hat. Deren Analyse gilt als hochwertiger
+            # als unsere eigene Schaetzung und gewinnt daher immer, wenn ein
+            # Tag vorhanden ist -- nicht nur als Luecken-Fuellung.
+            fresh_tags = read_existing_tags(filepath)
+            changed = False
+            if fresh_tags.get("bpm") and fresh_tags["bpm"] != row.get("bpm"):
+                row["bpm"] = fresh_tags["bpm"]
+                changed = True
+            if fresh_tags.get("key") and fresh_tags["key"] != row.get("key"):
+                row["key"] = fresh_tags["key"]
+                changed = True
 
             if not row.get("bpm"):
                 try:
                     row["bpm"] = compute_bpm(filepath)
+                    changed = True
                 except Exception as e:
                     log(f"BPM nicht ermittelbar bei {filepath.name}: {e}")
 
-            dt = time.time() - t0
-            log(f"{filepath.name}  ({dt:.1f}s)")
-            writer.writerow(row)
-            f.flush()
-            done += 1
+            scanned += 1
+            if changed:
+                dt = time.time() - t0
+                log(f"{filepath.name}  (Tags aktualisiert, {dt:.1f}s)")
+                writer.writerow(row)
+                f.flush()
+                analyzed += 1
+            else:
+                log(f"{filepath.name}  (vollstaendig)")
             if progress:
-                progress(done, len(todo))
+                progress(scanned, len(all_files))
 
-    return done, errors
+    return analyzed, errors

@@ -1,9 +1,14 @@
-"""SELECTA Textual-App: Such-Screen, Analyse-Modal, Transition-Planer.
+"""SELECTA Textual-App: Such-Screen, Analyse-Modal, Transition-Modus.
 
 Bedienlogik MainScreen (fzf-Stil: Suche haelt den Fokus, Aktionen auf Chords):
 - Tippen filtert die Library; druckbare Tasten tippen IMMER (nie Aktionen,
   sonst wuerde "Ambush" die Analyse starten).
-- Ctrl+A = Analyse, Ctrl+T = Transition -- jederzeit, auch beim Tippen.
+- Ctrl+A = Analyse -- jederzeit, auch beim Tippen.
+- Ctrl+T pinnt ein Transition-Ziel B (Fuzzy-Suche + Enter): Die Liste zeigt
+  dann Brueckenkandidaten mit Score zu beiden Seiten, sortiert nach der
+  schwaecheren. Enter re-anchort A und behaelt B; Enter auf B selbst,
+  Esc oder erneutes Ctrl+T beenden den Modus. Bewusst stateless -- kein
+  gespeicherter Pfad, das Set lebt in der DJ-Software.
 - Bei LEEREM Suchfeld sind ←/→ (Energie) und ,/. (BPM) Aktions-Tasten;
   mit Text im Feld bewegen sie den Cursor bzw. tippen.
 - ↑/↓/Enter laufen immer auf der Ergebnisliste (Cursor + Auswahl).
@@ -16,6 +21,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from rich.markup import escape
 from rich.text import Text
 from textual import events, on, work
 from textual.app import App, ComposeResult
@@ -24,19 +30,19 @@ from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.suggester import Suggester
-from textual.widgets import DataTable, Input, ProgressBar, RichLog, Select, Static
+from textual.widgets import DataTable, Input, ProgressBar, RichLog, Static
 
 from .config import (
-    BPM_FINETUNE_STEP,
     ENERGY_MAX,
     ENERGY_MIN,
+    SCORE_COLOR_STEPS,
     TOP_N,
-    TRANSITION_MAX_TRACKS,
 )
 from .library import Library, fuzzy_search, track_label
 from .similarity import (
     harmonic_distance,
-    plan_transition,
+    pair_score,
+    rank_bridge,
     rank_similar,
     relative_bpm_distance,
     _to_float,
@@ -52,6 +58,10 @@ CTRL_ACTION_KEYS = {"ctrl+a", "ctrl+t"}
 
 FILTER_COLUMNS = ("#", "TRACK", "BPM", "KEY")
 RESULT_COLUMNS = ("#", "TRACK", "BPM", "KEY", "SCORE", "ΔENERG", "ΔHÄRTE", "ΔMOOD")
+BRIDGE_COLUMNS = ("#", "TRACK", "BPM", "KEY", "SCORE→A", "SCORE→B")
+
+SEARCH_PLACEHOLDER = "Track suchen … (tippen zum Filtern)"
+TARGET_PLACEHOLDER = "Transition-Ziel suchen … (tippen zum Filtern)"
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +75,17 @@ def fmt_delta10(value) -> Text:
     scaled = round(value * 10)
     style = "orange1" if scaled > 0 else ("cyan" if scaled < 0 else "dim")
     return Text(f"{scaled:+d}" if scaled else "0", style=style)
+
+
+def score_style(score: float) -> str:
+    for threshold, style in SCORE_COLOR_STEPS:
+        if score >= threshold:
+            return style
+    return "red"
+
+
+def fmt_score_cell(score: float) -> Text:
+    return Text(f"{score:.3f}", style=score_style(score))
 
 
 def fmt_bpm_cell(track: dict, query: dict | None) -> Text:
@@ -151,8 +172,6 @@ class ResultsTable(DataTable):
             self.post_message(ActionKey(key))
             return
         if (event.is_printable and event.character) or key == "backspace":
-            # Nur der Such-Screen hat ein SearchInput; im Transition-Screen
-            # laufen Tipp-Eingaben nicht ueber die Tabelle.
             inputs = self.screen.query(SearchInput)
             if inputs:
                 search = inputs.first()
@@ -183,6 +202,8 @@ class MainScreen(Screen):
     def __init__(self):
         super().__init__()
         self.query_track: dict | None = None
+        self.transition_target: dict | None = None  # gepinntes Ziel B (Ctrl+T)
+        self._selecting_target = False  # Ctrl+T gedrueckt, B noch nicht gewaehlt
         self.energy = 0
         self.bpm_offset = 0
         self._row_tracks: list[dict] = []
@@ -196,7 +217,7 @@ class MainScreen(Screen):
             with Horizontal(id="topbar"):
                 yield Static(id="logo")
                 yield Static(id="status", markup=True)
-            yield SearchInput(placeholder="Track suchen … (tippen zum Filtern)", id="search")
+            yield SearchInput(placeholder=SEARCH_PLACEHOLDER, id="search")
             yield ResultsTable(id="results")
             yield Static(id="detail", markup=True)
             yield Static(id="keybar", markup=True)
@@ -207,7 +228,7 @@ class MainScreen(Screen):
         table.zebra_stripes = True
         self.query_one("#logo", Static).update(Text(LOGO, style="bold magenta"))
         self.query_one("#keybar", Static).update(
-            "[b]Enter[/b] wählen  [b]↑↓[/b] navigieren  [b]←→[/b] Energie  [b],[/b][b].[/b] BPM  "
+            "[b]Enter[/b] wählen  [b]↑↓[/b] navigieren  [b]←→[/b] Energie  [b],[/b][b].[/b] BPM-Filter  "
             "[b]^a[/b] Analyse  [b]^t[/b] Transition  [b]Esc[/b] leeren  [b]^c[/b] Ende"
         )
         self._update_header()
@@ -255,10 +276,31 @@ class MainScreen(Screen):
             energy = f"[cyan]{'◀' * -self.energy} ({self.energy:+d})[/]"
         else:
             energy = "[dim]─ (0)[/]"
-        bpm = f"[orange1]{self.bpm_offset:+d}[/]" if self.bpm_offset else "[dim]±0[/]"
+        q_bpm = _to_float(self.query_track.get("bpm")) if self.query_track else None
+        anchor = round(q_bpm) if q_bpm else None
+        if self.bpm_offset > 0 and anchor:
+            bpm = f"[orange1]≥{anchor + self.bpm_offset:.0f}[/]"
+        elif self.bpm_offset < 0 and anchor:
+            bpm = f"[orange1]≤{anchor + self.bpm_offset:.0f}[/]"
+        elif self.bpm_offset:
+            bpm = f"[orange1]{self.bpm_offset:+.0f}[/]"
+        else:
+            bpm = "[dim]±0[/]"
+
+        # Im Transition-Modus ersetzt das gepinnte Ziel die Energie-Anzeige
+        # (Energie ist dort deaktiviert); der Direkt-Score A->B zeigt, wie
+        # gross die Luecke noch ist, die ueberbrueckt wird.
+        if self.transition_target is not None and self.query_track is not None:
+            direct = pair_score(self.query_track, self.transition_target)
+            mode = (f"Transition → {escape(track_label(self.transition_target))} "
+                    f"[{score_style(direct)}]{direct:.3f}[/]")
+        elif self._selecting_target:
+            mode = "[orange1]Transition-Ziel wählen …[/]"
+        else:
+            mode = f"Energie {energy}"
 
         self.query_one("#status", Static).update(
-            f"[dim]{self.library.music_dir}[/]   {badge}   Energie {energy}   BPM {bpm}"
+            f"[dim]{self.library.music_dir}[/]   {badge}   {mode}   BPM {bpm}"
         )
 
     # --- Listen-Befuellung ---
@@ -290,15 +332,21 @@ class MainScreen(Screen):
             for i, t in enumerate(tracks)
         ]
         title = f"{len(tracks)} Treffer" if needle.strip() else f"Library ({len(tracks)} Tracks)"
+        if self._selecting_target:
+            title = f"Transition-Ziel wählen — {title}"
         self._fill_table(FILTER_COLUMNS, rows, tracks, title)
 
     def show_results(self) -> None:
-        """Ergebnis-Modus: Ranking zur aktuellen Query (inkl. Energie/BPM-Shift)."""
+        """Ergebnis-Modus: Ranking zur aktuellen Query (inkl. Energie/BPM-Shift);
+        mit gepinntem Transition-Ziel stattdessen die Brueckenkandidaten."""
         if self.query_track is None:
             self.show_filter("")
             return
         self._results_shown = True
         q = self.query_track
+        if self.transition_target is not None:
+            self._show_bridge_results()
+            return
         results = rank_similar(q, self.library, energy=self.energy, bpm_offset=self.bpm_offset, top=TOP_N)
         rows = []
         tracks = []
@@ -315,7 +363,33 @@ class MainScreen(Screen):
                 fmt_delta10(r["d_aggressive"]),
                 fmt_delta10(r["d_valence"]),
             ))
-        self._fill_table(RESULT_COLUMNS, rows, tracks, query_title(q))
+        title = query_title(q)
+        if self.bpm_offset and not results:
+            title += "  — 0 Treffer im BPM-Filter"
+        self._fill_table(RESULT_COLUMNS, rows, tracks, title)
+
+    def _show_bridge_results(self) -> None:
+        """Transition-Modus: Kandidaten zwischen Query (A) und Ziel (B),
+        sortiert nach der schwaecheren der beiden Uebergangs-Seiten."""
+        q, target = self.query_track, self.transition_target
+        results = rank_bridge(q, target, self.library, bpm_offset=self.bpm_offset, top=TOP_N)
+        rows = []
+        tracks = []
+        for i, r in enumerate(results):
+            t = r["track"]
+            tracks.append(t)
+            rows.append((
+                str(i + 1),
+                track_label(t),
+                fmt_bpm_cell(t, q),
+                fmt_key_cell(t, q),
+                fmt_score_cell(r["score_a"]),
+                fmt_score_cell(r["score_b"]),
+            ))
+        title = f"Transition: {track_label(q)} ⇄ {track_label(target)}"
+        if self.bpm_offset and not results:
+            title += "  — 0 Treffer im BPM-Filter"
+        self._fill_table(BRIDGE_COLUMNS, rows, tracks, title)
 
     def _update_detail(self) -> None:
         detail = self.query_one("#detail", Static)
@@ -328,9 +402,23 @@ class MainScreen(Screen):
     # --- Auswahl ---
 
     def select_track(self, track: dict) -> None:
-        """Track wird neue Query -- Kern-Loop der Graph-Navigation."""
-        self.query_track = track
+        """Track wird neue Query -- Kern-Loop der Graph-Navigation.
+
+        Im Transition-Modus: waehrend der Ziel-Auswahl pinnt Enter das Ziel
+        (Query bleibt); mit gepinntem Ziel re-anchort Enter die Query und
+        behaelt das Ziel -- ausser der Track IST das Ziel, dann ist die
+        Transition fertig und der Modus endet."""
         search = self.query_one(SearchInput)
+        if self._selecting_target:
+            self._selecting_target = False
+            self.transition_target = track
+            search.placeholder = SEARCH_PLACEHOLDER
+        elif (self.transition_target is not None
+              and track["filepath"] == self.transition_target["filepath"]):
+            self.transition_target = None
+            self.query_track = track
+        else:
+            self.query_track = track
         with search.prevent(Input.Changed):
             search.value = ""
         search.focus()
@@ -348,6 +436,8 @@ class MainScreen(Screen):
     def _on_search_changed(self, event: Input.Changed) -> None:
         if event.value.strip():
             self.show_filter(event.value)
+        elif self._selecting_target:
+            self.show_filter("")  # Ziel-Auswahl bleibt in der Library-Liste
         elif self.query_track is not None:
             self.show_results()
         else:
@@ -373,16 +463,42 @@ class MainScreen(Screen):
             self.action_analyze()
         elif key == "ctrl+t":
             self.action_transition()
-        elif key in ("left", "right") and self._results_shown:
+        elif key in ("left", "right") and self._results_shown and self.transition_target is None:
+            # Energie-Achse im Transition-Modus aus: ihr Ziel-Shifting
+            # kollidiert mit dem Brueckenziel zwischen A und B.
             step = 1 if key == "right" else -1
             self.energy = max(ENERGY_MIN, min(ENERGY_MAX, self.energy + step))
             self.show_results()
             self._update_header()
         elif key in ("comma", "full_stop") and self._results_shown:
-            step = BPM_FINETUNE_STEP if key == "full_stop" else -BPM_FINETUNE_STEP
-            self.bpm_offset += step
+            direction = 1 if key == "full_stop" else -1
+            self.bpm_offset = self._next_bpm_offset(direction)
             self.show_results()
             self._update_header()
+
+    def _next_bpm_offset(self, direction: int) -> float:
+        """Naechster BPM-Filter-Schritt: springt exakt auf den naechsten in
+        der Library tatsaechlich vorhandenen BPM-Wert, statt eine fixe
+        Schrittweite zu addieren. Dadurch wird nie ein Track uebersprungen
+        (bei zu grobem Schritt) und nie ein Tastendruck verschwendet (bei
+        zu feinem Schritt, wenn im Fenster gerade kein Track liegt). Ist
+        bereits der schnellste/langsamste Track erreicht, bleibt der Wert
+        stehen -- das begrenzt den Filter automatisch auf den Datenbereich."""
+        q_bpm = _to_float(self.query_track.get("bpm")) if self.query_track else None
+        if not q_bpm:
+            return self.bpm_offset
+        anchor = round(q_bpm)
+        cutoff = anchor + self.bpm_offset
+        candidates = sorted({
+            _to_float(t.get("bpm"))
+            for t in self.library.tracks
+            if t["filepath"] != self.query_track["filepath"] and _to_float(t.get("bpm"))
+        })
+        if direction > 0:
+            nxt = next((b for b in candidates if b > cutoff), None)
+        else:
+            nxt = next((b for b in reversed(candidates) if b < cutoff), None)
+        return self.bpm_offset if nxt is None else nxt - anchor
 
     # --- Actions (Screen-Bindings) ---
 
@@ -393,9 +509,17 @@ class MainScreen(Screen):
             table.move_cursor(row=new_row)
 
     def action_clear_search(self) -> None:
+        """Esc-Schichten: erst Suchtext leeren, dann Ziel-Auswahl abbrechen,
+        dann gepinntes Transition-Ziel loeschen."""
         search = self.query_one(SearchInput)
         if search.value:
             search.value = ""  # loest Changed aus -> zurueck zu Ergebnissen/Library
+        elif self._selecting_target:
+            self._exit_target_selection()
+        elif self.transition_target is not None:
+            self.transition_target = None
+            self.show_results()
+            self._update_header()
         search.focus()
 
     def action_analyze(self) -> None:
@@ -410,11 +534,34 @@ class MainScreen(Screen):
         self.app.push_screen(AnalyzeModal(status=self._status_cache), done)
 
     def action_transition(self) -> None:
-        def done(track) -> None:
-            if track is not None:
-                self.select_track(track)
+        """Ctrl+T: Ziel-Auswahl starten bzw. den Transition-Modus verlassen."""
+        if self._selecting_target:
+            self._exit_target_selection()
+        elif self.transition_target is not None:
+            self.transition_target = None
+            self.show_results()
+            self._update_header()
+        elif self.query_track is None:
+            self.app.notify("Transition braucht eine Query — erst Track mit Enter wählen.",
+                            severity="warning")
+        else:
+            self._selecting_target = True
+            search = self.query_one(SearchInput)
+            search.placeholder = TARGET_PLACEHOLDER
+            with search.prevent(Input.Changed):
+                search.value = ""
+            search.focus()
+            self.show_filter("")
+            self._update_header()
 
-        self.app.push_screen(TransitionScreen(initial_a=self.query_track), done)
+    def _exit_target_selection(self) -> None:
+        self._selecting_target = False
+        self.query_one(SearchInput).placeholder = SEARCH_PLACEHOLDER
+        if self.query_track is not None:
+            self.show_results()
+        else:
+            self.show_filter("")
+        self._update_header()
 
 
 # ---------------------------------------------------------------------------
@@ -519,156 +666,6 @@ class AnalyzeModal(ModalScreen):
             self.dismiss(True)
         else:
             self.dismiss(False)
-
-
-# ---------------------------------------------------------------------------
-# TransitionScreen: A -> B ueber k Zwischentracks
-# ---------------------------------------------------------------------------
-
-class TransitionScreen(Screen):
-    BINDINGS = [
-        Binding("escape", "back", "Zurück"),
-        Binding("up", "cursor(-1)", show=False),
-        Binding("down", "cursor(1)", show=False),
-    ]
-
-    def __init__(self, initial_a: dict | None = None):
-        super().__init__()
-        self.track_a: dict | None = initial_a
-        self.track_b: dict | None = None
-        self._row_tracks: list[dict] = []
-
-    def compose(self) -> ComposeResult:
-        with Vertical():
-            with Horizontal(id="topbar"):
-                yield Static(Text(LOGO, style="bold magenta"), id="logo")
-                yield Static("[b]Transition[/b] — von A nach B", id="status", markup=True)
-            yield Input(placeholder="Song A tippen + Enter …", id="input-a")
-            yield Static(id="resolved-a", markup=True)
-            yield Input(placeholder="Song B tippen + Enter …", id="input-b")
-            yield Static(id="resolved-b", markup=True)
-            with Horizontal(id="k-row"):
-                yield Static("Zwischentracks:", id="k-label")
-                yield Select(
-                    [("auto", 0)] + [(str(i), i) for i in range(1, TRANSITION_MAX_TRACKS + 1)],
-                    value=0, allow_blank=False, id="k-select",
-                )
-            yield ResultsTable(id="transition-table")
-            yield Static(id="detail", markup=True)
-            yield Static(
-                "[b]Enter[/b] Track als neue Suche übernehmen  [b]Esc[/b] zurück",
-                id="keybar", markup=True,
-            )
-
-    def on_mount(self) -> None:
-        table = self.query_one("#transition-table", ResultsTable)
-        table.cursor_type = "row"
-        table.zebra_stripes = True
-        if self.track_a is not None:
-            self._show_resolved("a", self.track_a)
-        self.query_one("#input-a" if self.track_a is None else "#input-b", Input).focus()
-
-    @property
-    def library(self) -> Library:
-        return self.app.library
-
-    def _resolve(self, needle: str) -> dict | None:
-        if not needle.strip() or not self.library.tracks:
-            return None
-        indices = fuzzy_search(needle, self.library.labels, limit=1)
-        return self.library.tracks[indices[0]] if indices else None
-
-    def _show_resolved(self, which: str, track: dict | None) -> None:
-        target = self.query_one(f"#resolved-{which}", Static)
-        if track is None:
-            target.update("[dim]— nicht gefunden —[/]")
-        else:
-            bpm = track.get("bpm") or "?"
-            key = track.get("key") or "?"
-            target.update(f"  [green]→ {track_label(track)}[/]  [dim]\\[{bpm} BPM | {key}][/]")
-
-    @on(Input.Submitted)
-    def _on_input_submitted(self, event: Input.Submitted) -> None:
-        track = self._resolve(event.value)
-        if event.input.id == "input-a":
-            self.track_a = track
-            self._show_resolved("a", track)
-            if track is not None:
-                self.query_one("#input-b", Input).focus()
-        else:
-            self.track_b = track
-            self._show_resolved("b", track)
-        self._recompute()
-
-    @on(Select.Changed)
-    def _on_k_changed(self, event: Select.Changed) -> None:
-        self._recompute()
-
-    def _recompute(self) -> None:
-        table = self.query_one("#transition-table", ResultsTable)
-        table.clear(columns=True)
-        self._row_tracks = []
-        if self.track_a is None or self.track_b is None:
-            return
-        if self.track_a["filepath"] == self.track_b["filepath"]:
-            self.query_one("#detail", Static).update("[yellow]A und B sind derselbe Track[/]")
-            return
-
-        k = self.query_one("#k-select", Select).value or None
-        rows = plan_transition(self.track_a, self.track_b, self.library, num_tracks=k)
-
-        table.add_columns("", "TRACK", "BPM", "KEY", "ΔEMB", "ΔBPM", "KEY-REL")
-        for i, row in enumerate(rows):
-            t = row["track"]
-            self._row_tracks.append(t)
-            deltas = row["deltas"]
-            if i == 0:
-                pos = Text("A", style="bold magenta")
-            elif i == len(rows) - 1:
-                pos = Text("B", style="bold magenta")
-            else:
-                pos = Text(str(i))
-
-            if deltas is None:
-                emb_cell, dbpm_cell, key_cell = Text("—", style="dim"), Text("—", style="dim"), Text("—", style="dim")
-            else:
-                d = deltas["emb_dist"]
-                emb_style = "green" if d < 0.1 else ("yellow" if d < 0.2 else "red")
-                emb_cell = Text(f"{d:.3f}", style=emb_style)
-                dbpm = deltas["d_bpm"]
-                dbpm_cell = Text("?" if dbpm is None else f"{dbpm:+.0f}")
-                rel = deltas["key_rel"]
-                if rel is None:
-                    key_cell = Text("?", style="dim")
-                elif rel <= 1:
-                    key_cell = Text("✓ harmonisch", style="green")
-                elif rel == 2:
-                    key_cell = Text("~ mixbar", style="yellow")
-                else:
-                    key_cell = Text("✗ Bruch", style="red")
-
-            table.add_row(
-                pos, track_label(t),
-                Text(str(t.get("bpm") or "?")), Text(str(t.get("key") or "?")),
-                emb_cell, dbpm_cell, key_cell,
-            )
-        if self._row_tracks:
-            table.move_cursor(row=0)
-            # Fokus auf die Kette: ↑/↓ + Enter uebernehmen direkt einen Track.
-            table.focus()
-
-    @on(DataTable.RowSelected)
-    def _on_row_selected(self, event: DataTable.RowSelected) -> None:
-        if 0 <= event.cursor_row < len(self._row_tracks):
-            self.dismiss(self._row_tracks[event.cursor_row])
-
-    def action_cursor(self, delta: int) -> None:
-        table = self.query_one("#transition-table", ResultsTable)
-        if self._row_tracks:
-            table.move_cursor(row=max(0, min(len(self._row_tracks) - 1, table.cursor_row + delta)))
-
-    def action_back(self) -> None:
-        self.dismiss(None)
 
 
 def resolve_music_dir(raw: str) -> Path:
@@ -810,7 +807,7 @@ class SelectaApp(App):
         width: 1fr;
         content-align: right middle;
     }
-    #search, #input-a, #input-b, #dir-input {
+    #search, #dir-input {
         border: tall $accent;
         margin: 0 1;
     }
@@ -833,23 +830,6 @@ class SelectaApp(App):
         padding: 0 1;
         background: $panel-darken-1;
         color: $text-muted;
-    }
-    #resolved-a, #resolved-b {
-        height: 1;
-        margin: 0 1;
-    }
-    #k-row {
-        height: 3;
-        margin: 0 1;
-    }
-    #k-label {
-        width: auto;
-        content-align: left middle;
-        height: 3;
-        margin-right: 1;
-    }
-    #k-select {
-        width: 14;
     }
     AnalyzeModal {
         align: center middle;

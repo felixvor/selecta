@@ -137,7 +137,7 @@ def fuzzy_search(needle: str, labels: list[str], limit: int = 50, cutoff: float 
 class Library:
     """Analysierte Tracks eines Musik-Ordners, suchfertig im Speicher.
 
-    tracks: Zeilen mit status=ok und Embedding, jeweils um '_embedding'
+    tracks: Zeilen mit vorhandenem Embedding, jeweils um '_embedding'
     (float32-Vektor) ergaenzt. matrix: zeilennormalisierte (N x dim)-Matrix
     fuer vektorisierte Cosine-Similarity.
     """
@@ -156,7 +156,7 @@ class Library:
         self._csv_rows = len(csv_data)
         self.tracks = []
         for filepath, row in csv_data.items():
-            if row.get("status") != "ok" or not row.get("embedding"):
+            if not row.get("embedding"):
                 continue
             track = dict(row)
             track["filepath"] = filepath

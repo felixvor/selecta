@@ -47,7 +47,7 @@ CSV_FIELDNAMES = [
     "arousal",
     "valence",
     "embedding",
-    "status",
+    "error",
 ]
 
 FLOAT_FIELDS = [
@@ -65,27 +65,22 @@ W_MOOD = 0.4
 # Wie viele Ergebniszeilen gerendert werden (Liste ist scrollbar).
 TOP_N = 100
 
+# Farbschwellen fuer die Transition-Score-Spalten: >= Schwelle -> Stil,
+# darunter rot. Absolute Werte -- je nach Library-Dichte ggf. nachkalibrieren.
+SCORE_COLOR_STEPS = [(0.9, "green"), (0.8, "yellow"), (0.7, "orange1")]
+
 # --- Energie-Achse (Target-Shifting) ----------------------------------------
 
 # Pro Energie-Stufe e (-3..+3) wird das Suchziel verschoben, nicht der Score
 # belohnt -- sonst gewinnt immer der extremste Track der Library.
-ENERGY_MIN = -3
-ENERGY_MAX = 3
+# +-6 deckt ab, wo die Ziel-Verschiebung physisch saettigt (aggressive/
+# relaxed klemmen bei 0/1, arousal bei 9) -- mehr Stufen waeren tote Tasten.
+ENERGY_MIN = -6
+ENERGY_MAX = 6
 BPM_PER_ENERGY_STEP = 3.5
 AROUSAL_PER_ENERGY_STEP = 0.4
 AGGRESSIVE_PER_ENERGY_STEP = 0.08
 RELAXED_PER_ENERGY_STEP = 0.08
 
-# BPM-Feintuning (',' / '.') unabhaengig von der Energie-Stufe.
-BPM_FINETUNE_STEP = 4
-
 # Wertebereich des DEAM-Modells (arousal/valence).
 AROUSAL_VALENCE_RANGE = (1.0, 9.0)
-
-# --- Transition-Planer -------------------------------------------------------
-
-TRANSITION_MAX_TRACKS = 8
-# auto-k: ein Zwischentrack pro "spuerbarem Sprung" in BPM / Embedding / Arousal.
-TRANSITION_BPM_PER_STEP = 4.0
-TRANSITION_EMB_DIST_PER_STEP = 0.12
-TRANSITION_AROUSAL_PER_STEP = 0.7

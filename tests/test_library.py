@@ -39,13 +39,14 @@ def test_compact_csv_prune_missing(tmp_path):
     assert len(reloaded) == 1
 
 
-def test_library_laedt_nur_ok_mit_embedding(tmp_path):
+def test_library_laedt_nur_zeilen_mit_embedding(tmp_path):
     music_dir = tmp_path / "musik"
     music_dir.mkdir()
     csv_path = music_dir / "library_analysis.csv"
     fp_ok, row_ok = make_row("ok.mp3", "X", "A", 126, "7m", [1, 0, 0])
     fp_err, row_err = make_row("err.mp3", "X", "B", 126, "7m", [0, 1, 0])
-    row_err["status"] = "error: kaputt"
+    row_err["embedding"] = ""
+    row_err["error"] = "kaputt"  # Debug-Info, beeinflusst das Laden nicht
     fp_alt, row_alt = make_row("alt.mp3", "X", "C", 126, "7m", [0, 0, 1])
     row_alt["embedding"] = ""  # Zeile aus altem Tool ohne Embedding
     compact_csv(csv_path, {fp_ok: row_ok, fp_err: row_err, fp_alt: row_alt})

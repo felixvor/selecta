@@ -1,11 +1,9 @@
-"""Ranking und Transition-Planung.
+"""Ranking und Transition-Bruecken.
 
 Kern: Cosine-Similarity der Track-Embeddings, minus Penalties fuer BPM-,
 Key- und Mood-Abweichung. Die Energie-Achse verschiebt das Suchziel
 (Target-Shifting) statt Extreme zu belohnen.
 """
-
-import math
 
 import numpy as np
 
@@ -16,10 +14,6 @@ from .config import (
     BPM_PER_ENERGY_STEP,
     RELAXED_PER_ENERGY_STEP,
     TOP_N,
-    TRANSITION_AROUSAL_PER_STEP,
-    TRANSITION_BPM_PER_STEP,
-    TRANSITION_EMB_DIST_PER_STEP,
-    TRANSITION_MAX_TRACKS,
     W_BPM,
     W_KEY,
     W_MOOD,
@@ -126,8 +120,8 @@ def mood_vector(row: dict) -> np.ndarray:
     )
 
 
-def shifted_target(query: dict, energy: int = 0, bpm_offset: float = 0.0):
-    """Suchziel aus der Query, verschoben um Energie-Stufe und BPM-Offset.
+def shifted_target(query: dict, energy: int = 0):
+    """Suchziel aus der Query, verschoben um die Energie-Stufe.
 
     Rueckgabe: (target_bpm | None, target_mood_vector).
     """
@@ -135,7 +129,7 @@ def shifted_target(query: dict, energy: int = 0, bpm_offset: float = 0.0):
     bpm_q = _to_float(query.get("bpm"))
     target_bpm = None
     if bpm_q:
-        target_bpm = bpm_q + BPM_PER_ENERGY_STEP * energy + bpm_offset
+        target_bpm = bpm_q + BPM_PER_ENERGY_STEP * energy
 
     aggressive = _to_float(query.get("aggressive")) or 0.0
     relaxed = _to_float(query.get("relaxed")) or 0.0
@@ -152,6 +146,17 @@ def shifted_target(query: dict, energy: int = 0, bpm_offset: float = 0.0):
     return target_bpm, target_mood
 
 
+def _bpm_cutoffs(q_bpm, bpm_offset):
+    """Harte Filtergrenzen (floor, ceiling) aus Query-BPM + Offset. Der Anker
+    wird gerundet (BPM liegt nicht immer als ganze Zahl vor -- eigene Analyse
+    liefert z.B. "128.1"), sonst waere der tatsaechliche Cutoff minimal
+    daneben ggue. dem, was App-Header und BPM-Stepping anzeigen."""
+    if not q_bpm or not bpm_offset:
+        return None, None
+    cutoff = round(q_bpm) + bpm_offset
+    return (cutoff, None) if bpm_offset > 0 else (None, cutoff)
+
+
 def _combined_score(cos_sim, bpm_pen, key_pen, mood_dist, w_bpm=W_BPM, w_key=W_KEY, w_mood=W_MOOD):
     score = cos_sim
     if bpm_pen is not None:
@@ -166,6 +171,13 @@ def rank_similar(query: dict, library, energy: int = 0, bpm_offset: float = 0.0,
     """Rankt die ganze Library gegen die (ggf. verschobene) Query.
 
     library: Library-Objekt (tracks + zeilennormalisierte matrix).
+    bpm_offset: harter Tempo-Filter relativ zur Query-BPM -- unabhaengig von
+    der Energie-Achse, die weiterhin weich auf Score/Mood wirkt.
+    >0 blendet alles UNTER query_bpm+offset aus (nur gleich/schneller),
+    <0 blendet alles UEBER query_bpm+offset aus (nur gleich/langsamer),
+    0 = kein Filter. Tracks ohne BPM-Tag fallen bei aktivem Filter raus,
+    da ihre Tauglichkeit nicht verifizierbar ist.
+
     Rueckgabe: Liste von dicts mit track, score, cos_sim und den
     Anzeige-Deltas relativ zur Query (nicht zum verschobenen Ziel).
     """
@@ -176,16 +188,24 @@ def rank_similar(query: dict, library, energy: int = 0, bpm_offset: float = 0.0,
     q_norm = q_emb / (np.linalg.norm(q_emb) + 1e-9)
     cos_all = library.matrix @ q_norm
 
-    target_bpm, target_mood = shifted_target(query, energy, bpm_offset)
+    target_bpm, target_mood = shifted_target(query, energy)
 
     q_bpm = _to_float(query.get("bpm"))
     q_arousal = _to_float(query.get("arousal"))
     q_aggressive = _to_float(query.get("aggressive"))
     q_valence = _to_float(query.get("valence"))
 
+    bpm_floor, bpm_ceiling = _bpm_cutoffs(q_bpm, bpm_offset)
+
     results = []
     for i, track in enumerate(library.tracks):
         if track["filepath"] == query["filepath"]:
+            continue
+
+        t_bpm = _to_float(track.get("bpm"))
+        if bpm_floor is not None and (t_bpm is None or t_bpm < bpm_floor):
+            continue
+        if bpm_ceiling is not None and (t_bpm is None or t_bpm > bpm_ceiling):
             continue
 
         bpm_pen = relative_bpm_distance(target_bpm, track.get("bpm"))
@@ -193,7 +213,6 @@ def rank_similar(query: dict, library, energy: int = 0, bpm_offset: float = 0.0,
         mood_dist = float(np.linalg.norm(mood_vector(track) - target_mood))
         score = _combined_score(float(cos_all[i]), bpm_pen, key_pen, mood_dist)
 
-        t_bpm = _to_float(track.get("bpm"))
         t_arousal = _to_float(track.get("arousal"))
         t_aggressive = _to_float(track.get("aggressive"))
         t_valence = _to_float(track.get("valence"))
@@ -214,90 +233,50 @@ def rank_similar(query: dict, library, energy: int = 0, bpm_offset: float = 0.0,
 
 
 # ---------------------------------------------------------------------------
-# Transition-Planer
+# Transition (Bruecke von A nach B)
 # ---------------------------------------------------------------------------
 
-def auto_num_tracks(track_a: dict, track_b: dict) -> int:
-    """Zwischentrack-Anzahl aus der Groesse des Sprungs A->B: ein Track pro
-    spuerbarem Schritt in BPM, Embedding-Distanz oder Arousal."""
-    a_emb = track_a["_embedding"]
-    b_emb = track_b["_embedding"]
-    a_n = a_emb / (np.linalg.norm(a_emb) + 1e-9)
-    b_n = b_emb / (np.linalg.norm(b_emb) + 1e-9)
-    emb_dist = 1.0 - float(np.dot(a_n, b_n))
-
-    bpm_a, bpm_b = _to_float(track_a.get("bpm")), _to_float(track_b.get("bpm"))
-    d_bpm = abs(bpm_a - bpm_b) if (bpm_a and bpm_b) else 0.0
-    ar_a, ar_b = _to_float(track_a.get("arousal")), _to_float(track_b.get("arousal"))
-    d_arousal = abs(ar_a - ar_b) if (ar_a is not None and ar_b is not None) else 0.0
-
-    k = max(
-        math.ceil(d_bpm / TRANSITION_BPM_PER_STEP),
-        math.ceil(emb_dist / TRANSITION_EMB_DIST_PER_STEP),
-        math.ceil(d_arousal / TRANSITION_AROUSAL_PER_STEP),
-    ) - 1
-    return max(1, min(TRANSITION_MAX_TRACKS, k))
+def pair_score(track_a: dict, track_b: dict) -> float:
+    """Direkter Uebergangs-Score zwischen zwei konkreten Tracks: Embedding-
+    Cosine minus BPM/Key/Mood-Penalties, ohne Energie-Verschiebung."""
+    a, b = track_a["_embedding"], track_b["_embedding"]
+    cos = float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
+    bpm_pen = relative_bpm_distance(track_a.get("bpm"), track_b.get("bpm"))
+    key_pen = harmonic_distance(track_a.get("key"), track_b.get("key"))
+    mood_dist = float(np.linalg.norm(mood_vector(track_a) - mood_vector(track_b)))
+    return _combined_score(cos, bpm_pen, key_pen, mood_dist)
 
 
-def _chain_deltas(prev: dict, cur: dict):
-    """Anzeige-Differenzen zwischen zwei aufeinanderfolgenden Kettengliedern."""
-    p = prev["_embedding"] / (np.linalg.norm(prev["_embedding"]) + 1e-9)
-    c = cur["_embedding"] / (np.linalg.norm(cur["_embedding"]) + 1e-9)
-    emb_dist = 1.0 - float(np.dot(p, c))
-    bpm_p, bpm_c = _to_float(prev.get("bpm")), _to_float(cur.get("bpm"))
-    d_bpm = (bpm_c - bpm_p) if (bpm_p and bpm_c) else None
-    key_rel = harmonic_distance(prev.get("key"), cur.get("key"))
-    return {"emb_dist": emb_dist, "d_bpm": d_bpm, "key_rel": key_rel}
+def rank_bridge(query: dict, target: dict, library, bpm_offset: float = 0.0, top: int = TOP_N):
+    """Brueckenkandidaten zwischen aktuellem Track (A) und Transition-Ziel (B).
 
+    Pro Kandidat der direkte Uebergangs-Score zu beiden Seiten, sortiert nach
+    der SCHWAECHEREN Seite (min) -- der Engpass entscheidet, ob eine Bruecke
+    funktioniert. Eine Summen-Sortierung wuerde 0.95/0.55 ueber 0.74/0.72
+    ranken, obwohl die B-Seite unbrauchbar ist. B laeuft selbst als Kandidat
+    mit (score_b == 1.0) und steht damit genau dann oben, wenn der
+    Direktsprung die beste Option ist. bpm_offset filtert hart relativ zu A,
+    wie in rank_similar."""
+    if library.matrix is None:
+        return []
 
-def plan_transition(track_a: dict, track_b: dict, library, num_tracks=None):
-    """Baut eine Kette A -> t1..tk -> B ueber lineare Wegpunkte im
-    Embedding-/BPM-/Mood-Raum; pro Wegpunkt greedy der beste unbenutzte Track.
+    q_bpm = _to_float(query.get("bpm"))
+    bpm_floor, bpm_ceiling = _bpm_cutoffs(q_bpm, bpm_offset)
 
-    num_tracks: int oder None (= auto).
-    Rueckgabe: Liste von Zeilen {track, deltas|None}, erste Zeile ist A.
-    """
-    k = num_tracks if num_tracks else auto_num_tracks(track_a, track_b)
-    k = max(1, min(TRANSITION_MAX_TRACKS, k))
-
-    a_emb = track_a["_embedding"] / (np.linalg.norm(track_a["_embedding"]) + 1e-9)
-    b_emb = track_b["_embedding"] / (np.linalg.norm(track_b["_embedding"]) + 1e-9)
-    bpm_a, bpm_b = _to_float(track_a.get("bpm")), _to_float(track_b.get("bpm"))
-    mood_a, mood_b = mood_vector(track_a), mood_vector(track_b)
-
-    used = {track_a["filepath"], track_b["filepath"]}
-    chain = [track_a]
-    prev = track_a
-
-    for i in range(1, k + 1):
-        t = i / (k + 1)
-        way_emb = (1 - t) * a_emb + t * b_emb
-        way_emb = way_emb / (np.linalg.norm(way_emb) + 1e-9)
-        way_bpm = (1 - t) * bpm_a + t * bpm_b if (bpm_a and bpm_b) else None
-        way_mood = (1 - t) * mood_a + t * mood_b
-
-        cos_all = library.matrix @ way_emb
-        best_idx, best_score = None, None
-        for j, track in enumerate(library.tracks):
-            if track["filepath"] in used:
-                continue
-            bpm_pen = relative_bpm_distance(way_bpm, track.get("bpm"))
-            key_pen = harmonic_distance(prev.get("key"), track.get("key"))
-            mood_dist = float(np.linalg.norm(mood_vector(track) - way_mood))
-            score = _combined_score(float(cos_all[j]), bpm_pen, key_pen, mood_dist)
-            if best_score is None or score > best_score:
-                best_idx, best_score = j, score
-
-        if best_idx is None:
-            break  # Library kleiner als die Kette
-        step = library.tracks[best_idx]
-        used.add(step["filepath"])
-        chain.append(step)
-        prev = step
-
-    chain.append(track_b)
-
-    rows = [{"track": chain[0], "deltas": None}]
-    for prev_t, cur_t in zip(chain, chain[1:]):
-        rows.append({"track": cur_t, "deltas": _chain_deltas(prev_t, cur_t)})
-    return rows
+    results = []
+    for track in library.tracks:
+        if track["filepath"] == query["filepath"]:
+            continue
+        t_bpm = _to_float(track.get("bpm"))
+        if bpm_floor is not None and (t_bpm is None or t_bpm < bpm_floor):
+            continue
+        if bpm_ceiling is not None and (t_bpm is None or t_bpm > bpm_ceiling):
+            continue
+        results.append({
+            "track": track,
+            "score_a": pair_score(query, track),
+            "score_b": pair_score(track, target),
+            "d_bpm": (t_bpm - q_bpm) if (t_bpm and q_bpm) else None,
+        })
+    results.sort(key=lambda r: min(r["score_a"], r["score_b"]), reverse=True)
+    return results[:top]
