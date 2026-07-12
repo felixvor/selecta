@@ -487,3 +487,34 @@ async def test_ctrl_l_query_bleibt_wenn_track_noch_dabei(two_music_dirs, librari
         assert screen.query_track["filepath"] == "house_a.mp3"  # Session lebt weiter
         assert screen._results_shown
         assert screen.query_one(ResultsTable).row_count == 2  # alle ausser Query
+
+
+async def test_suche_mit_query_behaelt_scores(app):
+    """Tippen mit gesetzter Query schaltet die Aehnlichkeit nicht mehr ab:
+    Suchtreffer zeigen die Score-Spalten (RESULT_COLUMNS) und die
+    Detail-Zeile die Score-Zerlegung."""
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = app.screen
+        await pilot.press(*"groove a", "enter")   # Query setzen
+        await pilot.press(*"hammer")              # suchen statt Ranking
+        table = screen.query_one(ResultsTable)
+        assert table.row_count == 1
+        labels = [str(col.label) for col in table.columns.values()]
+        assert "SCORE" in labels
+        # _row_results traegt das Result-Dict fuer die Warum-Zeile
+        assert screen._row_results is not None
+        assert screen._row_results[0]["track"]["title"] == "Hammer"
+
+
+async def test_zielauswahl_zeigt_direkten_score(app):
+    """In der Transition-Ziel-Auswahl zeigt die Suche SCORE→A -- den
+    direkten Sprung von der aktuellen Query zum Kandidaten."""
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = app.screen
+        await pilot.press(*"groove a", "enter")
+        await pilot.press("ctrl+t")
+        await pilot.press(*"hammer")
+        table = screen.query_one(ResultsTable)
+        labels = [str(col.label) for col in table.columns.values()]
+        assert "SCORE→A" in labels
+        assert table.row_count == 1

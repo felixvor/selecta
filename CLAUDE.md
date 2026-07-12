@@ -169,6 +169,12 @@ liegt in `~/.local/share/selecta/libraries.json`.
   Embedding-Ähnlichkeit der Top-10 fällt nur 0.944→0.918. Bei `energy == 0`
   bleibt bewusst die rohe 5-dim-Distanz — das Default-Ranking ist
   unangetastet.
+- **Suche schaltet die Ähnlichkeit nicht ab**: Tippen mit gesetzter Query
+  zeigt Suchtreffer MIT Score-Spalten (`_show_scored_filter`; TOP_N ist
+  reine Anzeige-Trunkierung, die Scores existieren für die ganze Library),
+  sortiert nach Suchrelevanz statt Score — wer tippt, sucht einen Namen.
+  Bewusst ohne harten BPM-Filter. In der Transition-Ziel-Auswahl zeigt
+  `SCORE→A` den direkten Sprung von der aktuellen Query zum Kandidaten.
 - **Transition-Sortierung nach `min(score_a, score_b)`** — der Engpass
   entscheidet, ob eine Brücke funktioniert. B läuft selbst als Kandidat mit
   (`score_b == 1.0`) und steht oben, sobald der Direktsprung am besten ist.

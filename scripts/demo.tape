@@ -51,16 +51,22 @@ Sleep 0.6s
 Up
 Sleep 1s
 
-# --- Analyse der House-Crate: 4 neue Tracks, Rest komplett ---
+# --- Analyse der House-Crate: 4 neue Tracks, Rest komplett. Die
+# Voll-Analysen laufen als Phase 1 zuerst (run_analysis). Doppel-Cut als
+# Zeitraffer: kurz das Modell-Laden zeigen, Cut, dann ~20s Stage-Ticker
+# mit mindestens einer aufploppenden ✓-Chip-Zeile, Cut bis Finished. ---
 Ctrl+A
 Sleep 2s
 Enter
-# Modell-Laden + erste Etappen kurz zeigen, dann Cut bis zum Ende
-Sleep 12s
+Sleep 3s
 Hide
-Sleep 240s
+Sleep 40s
 Show
-Sleep 4s
+Sleep 22s
+Hide
+Sleep 200s
+Show
+Sleep 3s
 Escape
 Sleep 1.5s
 

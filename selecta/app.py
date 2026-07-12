@@ -98,6 +98,7 @@ CTRL_ACTION_KEYS = {"ctrl+a", "ctrl+t", "ctrl+l"}
 FILTER_COLUMNS = ("#", "TRACK", "BPM", "KEY")
 RESULT_COLUMNS = ("#", "TRACK", "BPM", "KEY", "SCORE", "ΔENERG", "ΔHARD", "ΔMOOD")
 BRIDGE_COLUMNS = ("#", "TRACK", "BPM", "KEY", "SCORE→A", "SCORE→B")
+TARGET_COLUMNS = ("#", "TRACK", "BPM", "KEY", "SCORE→A")
 
 SEARCH_PLACEHOLDER = "Search tracks … (type to filter)"
 TARGET_PLACEHOLDER = "Search transition target … (type to filter)"
@@ -543,11 +544,23 @@ class MainScreen(Screen):
         self._update_detail()
 
     def show_filter(self, needle: str) -> None:
-        """Filter-Modus: Library nach Tippstring durchsuchen (leer = alle)."""
+        """Filter-Modus: Library nach Tippstring durchsuchen (leer = alle).
+
+        Mit gesetzter Query verliert die Suche die Aehnlichkeit NICHT mehr:
+        Die Cosine-Scores liegen fuer die ganze Library ohnehin vor (TOP_N
+        ist reine Anzeige-Trunkierung), also zeigen Suchtreffer dieselben
+        Score-Spalten wie das Ranking -- sortiert nach Suchrelevanz, nicht
+        nach Score (wer tippt, sucht einen Namen). In der Transition-Ziel-
+        Auswahl zeigt SCORE→A stattdessen den direkten Sprung von der
+        aktuellen Query zum Kandidaten."""
         self._results_shown = False
         lib = self.library
+        q = self.query_track
         if needle.strip():
             tracks = [lib.tracks[i] for i in fuzzy_search(needle, lib.labels)]
+            if q is not None:
+                self._show_scored_filter(q, tracks)
+                return
         else:
             order = sorted(range(len(lib.tracks)), key=lambda i: lib.labels[i].lower())
             tracks = [lib.tracks[i] for i in order]
@@ -562,6 +575,53 @@ class MainScreen(Screen):
         if self._selecting_target:
             title = f"Select transition target — {title}"
         self._fill_table(FILTER_COLUMNS, rows, tracks, title, heights)
+
+    def _show_scored_filter(self, q: dict, tracks: list[dict]) -> None:
+        """Suchtreffer MIT Score-Spalten (Query gesetzt). Kein harter
+        BPM-Filter -- wer nach Namen sucht, will den Track finden, nicht
+        eine Filter-Teilmenge davon."""
+        if self._selecting_target:
+            # Ziel-Auswahl: direkter Uebergangs-Score von der Query aus,
+            # damit man beim Pinnen sieht, wie weit das Ziel weg ist.
+            rows, heights, shown = [], [], []
+            for i, t in enumerate(tracks):
+                if t["filepath"] == q["filepath"]:
+                    continue
+                shown.append(t)
+                cell, height = fmt_track_cell(t)
+                heights.append(height)
+                rows.append((str(len(shown)), cell, fmt_bpm_cell(t, q),
+                             fmt_key_cell(t, q), fmt_score_cell(pair_score(q, t))))
+            title = f"Select transition target — {len(shown)} matches (SCORE→A: jump from current)"
+            self._fill_table(TARGET_COLUMNS, rows, shown, title, heights)
+            return
+
+        by_path = {
+            r["track"]["filepath"]: r
+            for r in rank_similar(q, self.library, energy=self.energy,
+                                  bpm_offset=0, top=len(self.library.tracks))
+        }
+        rows, heights, shown, results = [], [], [], []
+        for t in tracks:
+            r = by_path.get(t["filepath"])
+            if r is None:  # die Query selbst
+                continue
+            shown.append(t)
+            results.append(r)
+            cell, height = fmt_track_cell(t)
+            heights.append(height)
+            rows.append((
+                str(len(shown)),
+                cell,
+                fmt_bpm_cell(t, q),
+                fmt_key_cell(t, q),
+                Text(f"{r['score']:.3f}", style="bold"),
+                fmt_delta10(r["d_arousal"]),
+                fmt_delta10(r["d_aggressive"]),
+                fmt_delta10(r["d_valence"]),
+            ))
+        title = f"{len(shown)} matches — scored vs. {track_label(q)}"
+        self._fill_table(RESULT_COLUMNS, rows, shown, title, heights, results=results)
 
     def show_results(self) -> None:
         """Ergebnis-Modus: Ranking zur aktuellen Query (inkl. Energie/BPM-Shift);
