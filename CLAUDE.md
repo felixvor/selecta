@@ -101,12 +101,15 @@ liegt in `~/.local/share/selecta/libraries.json`.
   `◆B`-Marker statt Ranknummer auf der Zeile des Ziels; die Statuszeile
   zeigt nur noch knapp "Transition" (keine Doppelung zur Bar).
   CSS inline in `SelectaApp.CSS`.
-- **`scripts/`** — nicht Teil des Pakets: `key_eval.py` (Diagnose
-  Essentia-Key-Schätzung vs. DJ-Tags, siehe Key-Designentscheidung),
+- **`scripts/`** — nicht Teil des Pakets: `energy_eval.py` (Diagnose der
+  Energie-Achse auf echten Library-CSVs: churn/discovery/direction-Metriken
+  über Ranking-Varianten — Grundlage der z-Subspace-Designentscheidung),
   `demo_library.py` (fiktive Demo-Tracks + handgebaute Embedding-Cluster
-  für README-Assets), `make_screens.py` (SVG-Screenshots via Pilot →
-  `docs/`; nach UI-Änderungen neu ausführen), `demo.tape` (VHS-Drehbuch
-  fürs README-GIF; braucht installiertes `vhs`).
+  für README-Assets; erzeugt zwei Crates: demo-crate + warmup-crate, damit
+  Launcher-Screenshots nicht nach Ein-Ordner-Tool aussehen),
+  `make_screens.py` (SVG-Screenshots via Pilot → `docs/`; nach
+  UI-Änderungen neu ausführen), `demo.tape` (VHS-Drehbuch fürs README-GIF;
+  braucht installiertes `vhs`).
 - **`cli.py`** — Entry Point `selecta` (TUI) und Subcommand `selecta analyze`
   mit verstecktem `--porcelain`-Flag. Porcelain-Protokoll: `::progress i n`
   (Fortschrittsbalken) und `::status {json}` (Events `track`/`stage`/`done`
@@ -148,7 +151,16 @@ liegt in `~/.local/share/selecta/libraries.json`.
   Rekordbox-Analyse gilt als hochwertiger als die eigene Schätzung.
 - **Energie-Achse = Target-Shifting**, kein Score-Bonus für Extreme (sonst
   gewinnt immer der härteste Track der Library). Bereich ±6, weil dort die
-  Zielverschiebung physisch sättigt.
+  Zielverschiebung physisch sättigt. Bei `energy != 0` wird die Mood-Distanz
+  z-normiert (Library-Std pro Dimension, `mood_scales`) und auf die
+  tatsächlich verschobenen Dimensionen beschränkt (`ENERGY_DIM_MASK`:
+  aggressive/relaxed/arousal — danceable ist in DJ-Libraries praktisch
+  konstant, valence hat mit Energie nichts zu tun). Datengetrieben gewählt
+  (`scripts/energy_eval.py`, 1426 echte Tracks): Monotonie der
+  Energie-Antwort 0.79→0.96, doppelt so viele neu aufgedeckte Tracks,
+  Embedding-Ähnlichkeit der Top-10 fällt nur 0.944→0.918. Bei `energy == 0`
+  bleibt bewusst die rohe 5-dim-Distanz — das Default-Ranking ist
+  unangetastet.
 - **Transition-Sortierung nach `min(score_a, score_b)`** — der Engpass
   entscheidet, ob eine Brücke funktioniert. B läuft selbst als Kandidat mit
   (`score_b == 1.0`) und steht oben, sobald der Direktsprung am besten ist.
@@ -207,9 +219,24 @@ liegt in `~/.local/share/selecta/libraries.json`.
 
 ## Offene TODOs (Nutzer):
 
-- `docs/demo.gif` erzeugen, sobald `vhs` (+ ttyd/ffmpeg) in WSL
-  installiert ist: `python scripts/demo_library.py /tmp/selecta-demo/demo-crate
-  && vhs scripts/demo.tape`, danach das GIF oben in der README verlinken.
+- GIF-Erweiterung (optional): Launcher/Analyse-Lauf mit ins Drehbuch
+  nehmen (Library anlegen, analysieren mit Skip zu 100%). Heikel: der
+  Launcher liest die ECHTE libraries.json des Nutzers — dafür müsste
+  demo.tape mit isoliertem HOME laufen.
 
-- Im Analyselog steht 0 von 833 tracks analyzed, 833 open aber der wert ändert sich nicht während der analyse. entweder live anpassen oder weglassen.
-- im analyselog sehe ich bei den tracks immer ? BPM und ? als key, warum? den wert sagen wir doch für die tracks voraus oder nicht? keine ? mehr, entweder wir analysieren den wert selbst oder übernehmen/aktualisieren auf basis der metadaten in des soundfiles
+Erledigt (2026-07-12): Live-Zähler im Analyselog statt statischem
+"X of Y"-Satz; '? BPM ?'-Bug (Voll-Analyse rechnet BPM/Key jetzt selbst,
+`_fill_missing_bpm_key`); Enter kopiert das Track-Label per OSC-52 in die
+Zwischenablage; Energie-Achse auf z-Subspace-Distanz umgestellt (siehe
+Designentscheidungen); Score-Zerlegung in der Detail-Zeile
+(`fmt_why_line`); Demo-Assets: 2 prozedural gefüllte Crates (~235
+Tracks), Launcher-Shot mit 7 fiktiven DJ-Libraries (Status-Cache wird in
+make_screens direkt gesetzt, die Pfade existieren nicht);
+`docs/demo.gif` erzeugt und in der README verlinkt. Verworfen: portable
+Build ohne WSL (Essentia-Ersatz nötig, Embeddings würden inkompatibel).
+
+GIF-Regenerierung: vhs/ttyd/ffmpeg liegen als statische Binaries in
+`~/.local/bin` (WSL, ohne sudo installiert); vhs' Chromium braucht
+`LD_LIBRARY_PATH=$HOME/.local/chromium-libs/usr/lib/x86_64-linux-gnu`
+(per apt-get download entpackte Libs, kein Systemeingriff). Ablauf:
+`python scripts/demo_library.py /tmp/selecta-demo && vhs scripts/demo.tape`.

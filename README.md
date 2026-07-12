@@ -2,6 +2,8 @@
 
 A terminal tool for set preparation and live DJing: finds the right next track while you play, or helps you build a selection ahead of time. One track as the query, your own library as the answer — ranked by audio embeddings computed straight from the signal, re-ranked by BPM, key and mood. Deliberately stateless, a tool that runs alongside Rekordbox & co. and answers the two questions they leave open — *what fits this track?* and *how do I get smoothly from track A to track B?*
 
+![Demo: search, ranking, energy shift and transition bridging](docs/demo.gif)
+
 ![Similarity ranking for a query track](docs/ranking.svg)
 
 - **Your music, wherever it came from.** SELECTA listens to the audio

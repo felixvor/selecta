@@ -328,6 +328,31 @@ class EssentiaAnalyzer:
         }
 
 
+def _fill_missing_bpm_key(row: dict, filepath: Path, log) -> bool:
+    """Fehlende BPM/Key-Werte selbst berechnen (Fallback ohne TF-Modelle).
+
+    Laeuft in BEIDEN Analyse-Pfaden: nach der Voll-Analyse (deren Heads
+    liefern kein BPM/Key -- ohne diesen Aufruf stand im Log '? BPM ?' und
+    die Werte kamen erst beim zweiten Lauf) und beim billigen Tag-Re-Check.
+    Rueckgabe: True, wenn etwas berechnet wurde."""
+    changed = False
+    if not row.get("bpm"):
+        try:
+            row["bpm"] = compute_bpm(filepath)
+            changed = True
+        except Exception as e:
+            log(f"Could not determine BPM for {filepath.name}: {e}")
+
+    if not row.get("key"):
+        try:
+            row["key"] = compute_key(filepath)
+            row["key_estimated"] = "1" if row["key"] else ""
+            changed = changed or bool(row["key"])
+        except Exception as e:
+            log(f"Could not determine key for {filepath.name}: {e}")
+    return changed
+
+
 def _done_event(kind: str, filepath: Path, row: dict, secs: float) -> dict:
     """Strukturiertes Ergebnis eines Datei-Durchlaufs -- Grundlage fuer die
     Ergebniszeile im Log (TUI rendert Chips, headless eine Textzeile).
@@ -463,6 +488,10 @@ def run_analysis(music_dir, models_dir, log=print, progress=None, cancelled=None
                 try:
                     row.update(read_existing_tags(filepath))
                     row.update(analyzer.analyze(filepath, stage=stage_cb))
+                    # Die TF-Heads liefern kein BPM/Key -- hat die Datei
+                    # keine DJ-Tags, hier direkt selbst rechnen, sonst
+                    # zeigt der Lauf '?' und erst der zweite Lauf fuellt auf.
+                    _fill_missing_bpm_key(row, filepath, log)
                     row["error"] = ""
                 except Exception as e:
                     row = {k: "" for k in CSV_FIELDNAMES}
@@ -507,20 +536,7 @@ def run_analysis(music_dir, models_dir, log=print, progress=None, cancelled=None
                 row["year"] = fresh_tags["year"]
                 changed = True
 
-            if not row.get("bpm"):
-                try:
-                    row["bpm"] = compute_bpm(filepath)
-                    changed = True
-                except Exception as e:
-                    log(f"Could not determine BPM for {filepath.name}: {e}")
-
-            if not row.get("key"):
-                try:
-                    row["key"] = compute_key(filepath)
-                    row["key_estimated"] = "1" if row["key"] else ""
-                    changed = changed or bool(row["key"])
-                except Exception as e:
-                    log(f"Could not determine key for {filepath.name}: {e}")
+            changed = _fill_missing_bpm_key(row, filepath, log) or changed
 
             scanned += 1
             if changed:

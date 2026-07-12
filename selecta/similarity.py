@@ -186,6 +186,39 @@ def mood_vector(row: dict) -> np.ndarray:
     )
 
 
+# Welche Mood-Dimensionen die Energie-Achse tatsaechlich verschiebt
+# (aggressive, relaxed, arousal) -- danceable/valence bleiben beim
+# Target-Shifting fix und werden bei aktiver Energie ausgeblendet
+# (Reihenfolge wie mood_vector: aggressive, relaxed, danceable,
+# arousal, valence).
+ENERGY_DIM_MASK = np.array([1.0, 1.0, 0.0, 1.0, 0.0], dtype=np.float32)
+
+
+def mood_scales(tracks) -> np.ndarray:
+    """Standardabweichung pro Mood-Dimension ueber die Library (auf
+    mood_vector-Skala). Grundlage der z-normierten Energie-Distanz:
+    ohne Normierung dominiert die Dimension mit der zufaellig groessten
+    Roh-Spanne, obwohl z.B. danceable in einer DJ-Library praktisch
+    konstant ist (gemessen: std 0.011) und nichts aussagt."""
+    vecs = np.stack([mood_vector(t) for t in tracks])
+    return np.maximum(vecs.std(axis=0), 1e-3)
+
+
+def energy_mood_distance(track_vec: np.ndarray, target_mood: np.ndarray, scales: np.ndarray) -> float:
+    """Mood-Distanz bei aktiver Energie-Achse: z-normiert und nur ueber die
+    tatsaechlich verschobenen Dimensionen (ENERGY_DIM_MASK), skaliert auf
+    die Groessenordnung der 5-dim-Distanz.
+
+    Datengetrieben gewaehlt (scripts/energy_eval.py, 1426 echte Tracks):
+    ggue. der rohen 5-dim-Distanz steigt die Monotonie der Energie-Antwort
+    (Spearman 0.79 -> 0.96) und die Zahl neu aufgedeckter Tracks pro
+    Energie-Stufe verdoppelt sich (discovery@10 3.3 -> 8.1), waehrend die
+    mittlere Embedding-Aehnlichkeit der Top-10 nur minimal faellt
+    (0.944 -> 0.918)."""
+    zdiff = (track_vec - target_mood) / scales
+    return float(np.linalg.norm(zdiff * ENERGY_DIM_MASK)) * float(np.sqrt(5.0 / 3.0))
+
+
 def shifted_target(query: dict, energy: int = 0):
     """Suchziel aus der Query, verschoben um die Energie-Stufe.
 
@@ -263,6 +296,11 @@ def rank_similar(query: dict, library, energy: int = 0, bpm_offset: float = 0.0,
 
     bpm_floor, bpm_ceiling = _bpm_cutoffs(q_bpm, bpm_offset)
 
+    # Bei energy == 0 bleibt das Ranking exakt wie bisher (rohe 5-dim-
+    # Distanz); erst die Energie-Taste schaltet auf die z-normierte
+    # Subspace-Distanz um -- siehe energy_mood_distance.
+    scales = mood_scales(library.tracks) if energy != 0 else None
+
     results = []
     for i, track in enumerate(library.tracks):
         if track["filepath"] == query["filepath"]:
@@ -276,7 +314,10 @@ def rank_similar(query: dict, library, energy: int = 0, bpm_offset: float = 0.0,
 
         bpm_pen = relative_bpm_distance(target_bpm, track.get("bpm"))
         key_pen = harmonic_distance(query.get("key"), track.get("key"))
-        mood_dist = float(np.linalg.norm(mood_vector(track) - target_mood))
+        if scales is not None:
+            mood_dist = energy_mood_distance(mood_vector(track), target_mood, scales)
+        else:
+            mood_dist = float(np.linalg.norm(mood_vector(track) - target_mood))
         score = _combined_score(float(cos_all[i]), bpm_pen, key_pen, mood_dist)
 
         t_arousal = _to_float(track.get("arousal"))
@@ -287,6 +328,10 @@ def rank_similar(query: dict, library, energy: int = 0, bpm_offset: float = 0.0,
             "track": track,
             "score": score,
             "cos_sim": float(cos_all[i]),
+            # Rohe Penalty-Terme fuer die Score-Zerlegung in der Detail-
+            # Zeile ("warum steht der hier?") -- None = neutral/unbekannt.
+            "bpm_pen": bpm_pen,
+            "mood_dist": mood_dist,
             "key_pen": key_pen,
             "d_bpm": (t_bpm - q_bpm) if (t_bpm and q_bpm) else None,
             "d_arousal": (t_arousal - q_arousal) if (t_arousal is not None and q_arousal is not None) else None,

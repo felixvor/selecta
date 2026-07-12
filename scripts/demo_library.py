@@ -67,13 +67,124 @@ DEMO_TRACKS = [
 ]
 
 
-def create_demo_library(target_dir) -> Path:
+# Zweite, kleinere Crate fuer Multi-Library-Screenshots: Der Launcher soll
+# im README nicht wie ein Ein-Ordner-Tool aussehen. Klanglich ein Warmup-/
+# Listening-Regal (Ambient/Breaks), das sich mit dem Ambient-Cluster der
+# Haupt-Crate ueberlappt -- so zeigt die Suche ueber beide Libraries
+# hinweg sinnvolle Nachbarn.
+WARMUP_TRACKS = [
+    ("Riverbed Static", "Moth Season", 92, "1m", [0.20, 0.08, 1.00],
+     "Ambient", "dreamy|calm", "2015", 2.1, 0.02, 0.99, 0.30, 6.5),
+    ("Halden Loop", "Winter Balcony", 100, "2m", [0.30, 0.10, 0.98],
+     "Downtempo|Ambient", "deep|meditative", "2018", 2.9, 0.04, 0.97, 0.55, 6.1),
+    ("Cloud Ledger", "Sunday Geometry", 112, "3m", [0.46, 0.14, 0.92],
+     "Downtempo|Trip Hop", "warm|groovy", "2021", 3.9, 0.08, 0.90, 0.75, 6.7),
+    ("Fjara", "Salt Radio", 115, "10m", [0.55, 0.12, 0.85],
+     "Organic House|Downtempo", "melodic|warm", "2022", 4.2, 0.09, 0.88, 0.80, 6.9),
+    ("Paper Tigers Sleep", "Low Orbit Lullaby", 84, "12m", [0.16, 0.06, 1.00],
+     "Ambient|Drone", "space|meditative", "2014", 1.8, 0.01, 0.99, 0.20, 5.9),
+    ("Miro Delta", "Breakfast in Reverse", 118, "4m", [0.60, 0.20, 0.80],
+     "Breaks|Downtempo", "fun|retro", "2020", 4.6, 0.12, 0.82, 0.85, 7.0),
+]
+
+
+# --- Prozedurale Auffuellung -------------------------------------------------
+# Die kuratierten Tracks oben bleiben als Anker (make_screens/demo.tape
+# suchen "velvet"/"pressure"), aber eine 15-Track-Library sieht im README
+# nach Spielzeug aus. Der Generator fuellt beide Crates auf realistische
+# Groesse auf: plausible Artist/Titel-Kombinationen, Cluster-Embeddings mit
+# Rauschen, BPM/Key/Moods passend zum Cluster. Seed fest -> reproduzierbar.
+
+_ARTIST_A = [
+    "Aiden", "Marlow", "Selia", "Ronan", "Petra", "Idris", "Nova", "Casper",
+    "Lena", "Viktor", "Sana", "Ilias", "Mara", "Theo", "Nyra", "Bruno",
+    "Alva", "Dario", "Femi", "Greta", "Janto", "Kaia", "Loris", "Mio",
+]
+_ARTIST_B = [
+    "Vance", "Kessler", "Duarte", "Lindqvist", "Okafor", "Marino", "Reyes",
+    "Falk", "Sørensen", "Baptiste", "Klein", "Navarro", "Petrov", "Sato",
+    "Whitfield", "Andersson", "Costa", "Meier", "Oduya", "Silva",
+]
+_ARTIST_SOLO = [
+    "Kilowatt Social", "Paper Antenna", "Bassment Trust", "Modular Grief",
+    "Hotel Neon", "Klangfabrik", "Southbound Freight", "Tape Loop City",
+    "The Attic Committee", "Grey Harbour", "Analog Weather", "Fern & Firmament",
+    "Night Bus Cartel", "Ceramic Youth", "Ostkreuz Kollektiv", "Velour System",
+    "Dune Office", "Rotor y Rumba", "Cold Latitude", "Marble Arcade",
+]
+_TITLE_ADJ = [
+    "Broken", "Velvet", "Neon", "Silent", "Rolling", "Hidden", "Electric",
+    "Slow", "Golden", "Concrete", "Distant", "Burning", "Liquid", "Northern",
+    "Peculiar", "Static", "Tidal", "Undone", "Vertical", "Weightless",
+]
+_TITLE_NOUN = [
+    "Corridor", "Signal", "Harbour", "Motion", "Pattern", "Reunion",
+    "Shelter", "Tension", "Voltage", "Window", "Afterglow", "Circuit",
+    "Dispatch", "Elevation", "Frequency", "Garden", "Horizon", "Interlude",
+    "Junction", "Kingdom", "Mirage", "Nocturne", "Orbit", "Postcard",
+]
+_TITLE_SUFFIX = ["", "", "", "", " - Original Mix", " - Extended Mix",
+                 " - Radio Edit", " - Dub", " - Remix"]
+
+# (embedding-basis, bpm-spanne, arousal-spanne, aggressive-spanne,
+#  relaxed-spanne, genres-pool, vibes-pool, jahr-spanne)
+_CLUSTERS = {
+    "deep": ([1.00, 0.30, 0.12], (120, 125), (4.6, 6.2), (0.08, 0.30), (0.60, 0.90),
+             ["Deep House", "Deep House|Tech House", "Deep House|Organic House"],
+             ["deep|groovy", "warm|melodic", "groovy", "deep|dark"], (2013, 2024)),
+    "tech": ([0.94, 0.46, 0.05], (124, 129), (5.8, 6.9), (0.25, 0.50), (0.35, 0.65),
+             ["Tech House", "Tech House|Minimal", "Minimal|Deep Tech", "Tech House|Deep House"],
+             ["dark|driving", "groovy|hypnotic", "dark", "energetic"], (2016, 2025)),
+    "techno": ([0.38, 1.00, 0.03], (132, 140), (6.9, 8.0), (0.55, 0.90), (0.05, 0.30),
+               ["Techno", "Peak Time Techno", "Hard Techno", "Techno|Industrial"],
+               ["dark|driving", "hypnotic", "dark|industrial", "powerful"], (2018, 2025)),
+    "warmup": ([0.30, 0.10, 0.97], (84, 118), (1.8, 4.6), (0.01, 0.12), (0.80, 0.99),
+               ["Ambient", "Downtempo", "Downtempo|Trip Hop", "Organic House|Downtempo",
+                "Ambient|Drone", "Breaks|Downtempo"],
+               ["dreamy|calm", "deep|meditative", "warm|melodic", "space", "fun|retro"],
+               (2010, 2023)),
+}
+
+
+def _generate_tracks(rng, cluster_counts):
+    """Zufaellige, aber plausibel benannte Tracks je Cluster."""
+    tracks = []
+    used_names = set()
+    for cluster, count in cluster_counts.items():
+        base, bpm_r, ar_r, ag_r, rel_r, genres, vibes, years = _CLUSTERS[cluster]
+        for _ in range(count):
+            while True:
+                if rng.random() < 0.45:
+                    artist = rng.choice(_ARTIST_SOLO)
+                else:
+                    artist = f"{rng.choice(_ARTIST_A)} {rng.choice(_ARTIST_B)}"
+                title = f"{rng.choice(_TITLE_ADJ)} {rng.choice(_TITLE_NOUN)}{rng.choice(_TITLE_SUFFIX)}"
+                if (artist, title) not in used_names:
+                    used_names.add((artist, title))
+                    break
+            emb = [max(0.0, v + rng.gauss(0, 0.06)) for v in base]
+            bpm = rng.randint(*bpm_r)
+            key = f"{rng.randint(1, 12)}{'m' if rng.random() < 0.72 else 'd'}"
+            arousal = round(rng.uniform(*ar_r), 1)
+            aggressive = round(rng.uniform(*ag_r), 2)
+            relaxed = round(rng.uniform(*rel_r), 2)
+            danceable = round(rng.uniform(0.88, 0.99) if cluster != "warmup"
+                              else rng.uniform(0.2, 0.8), 2)
+            valence = round(rng.uniform(4.5, 7.0), 1)
+            tracks.append((artist, title, bpm, key, emb,
+                           rng.choice(genres), rng.choice(vibes),
+                           str(rng.randint(*years)), arousal, aggressive,
+                           relaxed, danceable, valence))
+    return tracks
+
+
+def create_demo_library(target_dir, tracks=DEMO_TRACKS) -> Path:
     """Legt den Demo-Ordner an (idempotent) und liefert seinen Pfad."""
     target_dir = Path(target_dir).resolve()
     target_dir.mkdir(parents=True, exist_ok=True)
     rows = {}
     for (artist, title, bpm, key, emb, genres, vibes, year,
-         arousal, aggressive, relaxed, danceable, valence) in DEMO_TRACKS:
+         arousal, aggressive, relaxed, danceable, valence) in tracks:
         filepath = target_dir / f"{artist} - {title}.mp3"
         filepath.touch()
         encoded = encode_embedding(np.array(emb, dtype=np.float32))
@@ -91,6 +202,21 @@ def create_demo_library(target_dir) -> Path:
     return target_dir
 
 
+def create_demo_crates(base_dir) -> tuple[Path, Path]:
+    """Beide Demo-Crates unter base_dir: (House, Warmup) -- kuratierte
+    Anker-Tracks plus prozedurale Auffuellung auf realistische Groesse."""
+    import random
+    base = Path(base_dir).resolve()
+    rng = random.Random(2026)
+    house = DEMO_TRACKS + _generate_tracks(rng, {"deep": 68, "tech": 52, "techno": 41})
+    warmup = WARMUP_TRACKS + _generate_tracks(rng, {"warmup": 57})
+    return (
+        create_demo_library(base / "House", tracks=house),
+        create_demo_library(base / "Warmup", tracks=warmup),
+    )
+
+
 if __name__ == "__main__":
-    dest = sys.argv[1] if len(sys.argv) > 1 else "demo_library"
-    print(create_demo_library(dest))
+    base = sys.argv[1] if len(sys.argv) > 1 else "demo_library"
+    for crate in create_demo_crates(base):
+        print(crate)

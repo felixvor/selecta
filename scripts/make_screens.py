@@ -21,12 +21,28 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from demo_library import create_demo_library  # noqa: E402  (scripts/-Nachbar)
+from demo_library import create_demo_crates  # noqa: E402  (scripts/-Nachbar)
 
 import selecta.app as app_module  # noqa: E402
 from selecta.app import SelectaApp  # noqa: E402
 
 DOCS_DIR = Path(__file__).resolve().parent.parent / "docs"
+
+# Fuers Launcher-Bild: plausible DJ-Libraries statt der 15-Track-Technik-Demo.
+# Die Pfade existieren nicht -- die Status-Zellen werden nach dem (ins Leere
+# laufenden) Scan direkt im Screen-Cache ueberschrieben. Es geht um den
+# ersten Eindruck im README: so saehe das Tool ueber einer echten,
+# gewachsenen Sammlung aus (Hunderte Tracks, einer davon mitten in der
+# Analyse, einer inaktiv).
+FAKE_LIBRARIES = [
+    ("/mnt/d/Music/House", True, (687, 687)),
+    ("/mnt/d/Music/Techno & Peaktime", True, (418, 418)),
+    ("/mnt/d/Music/Warmup & Downtempo", False, (183, 201)),
+    ("/mnt/d/Music/Disco & Edits", False, (96, 96)),
+    ("/mnt/d/Music/Drum & Bass", False, (241, 241)),
+    ("/mnt/d/Music/Ambient & Listening", False, (154, 154)),
+    ("/mnt/d/Music/Crates/Festival 2026", False, (0, 42)),
+]
 
 
 def save(app: SelectaApp, name: str) -> None:
@@ -37,7 +53,9 @@ def save(app: SelectaApp, name: str) -> None:
 
 
 async def main() -> None:
-    demo_dir = create_demo_library(Path(tempfile.gettempdir()) / "selecta-demo" / "demo-crate")
+    # Zwei Crates, damit der Launcher-Screenshot nicht wie ein
+    # Ein-Ordner-Tool aussieht.
+    demo_dir, warmup_dir = create_demo_crates(Path(tempfile.gettempdir()) / "selecta-demo")
 
     # Launcher liest die gemerkte Library-Liste -- auf eine Wegwerf-Datei
     # umbiegen, damit die echte ~/.local/share/selecta unangetastet bleibt.
@@ -45,16 +63,31 @@ async def main() -> None:
     app_module.LIBRARIES_FILE = state_dir / "libraries.json"
     app_module.LAST_DIR_FILE = state_dir / "last_dir"
     app_module.LIBRARIES_FILE.write_text(
-        json.dumps({"libraries": [{"path": str(demo_dir), "active": True}]}),
+        json.dumps({"libraries": [
+            {"path": path, "active": active} for path, active, _ in FAKE_LIBRARIES
+        ]}),
         encoding="utf-8",
     )
 
     # 1) Launcher (eigene App-Instanz: Basis-Screen ist der LibraryScreen)
     app = SelectaApp()
-    async with app.run_test(size=(100, 22)) as pilot:
-        await asyncio.sleep(1.0)  # dir_status-Thread fuellt die TRACKS-Spalte
+    async with app.run_test(size=(100, 26)) as pilot:
+        await asyncio.sleep(1.0)  # Scan-Thread laeuft (ins Leere) durch
+        # Fake-Pfade existieren nicht -> Status-Zellen direkt setzen.
+        screen = app.screen
+        screen._statuses.update({path: counts for path, _, counts in FAKE_LIBRARIES})
+        screen._render_entries()
         await pilot.pause()
         save(app, "launcher.svg")
+
+    # Ranking/Transition laufen weiter gegen die echte Demo-Crate.
+    app_module.LIBRARIES_FILE.write_text(
+        json.dumps({"libraries": [
+            {"path": str(demo_dir), "active": True},
+            {"path": str(warmup_dir), "active": True},
+        ]}),
+        encoding="utf-8",
+    )
 
     # 2) + 3) Suche: Query waehlen, dann Transition pinnen
     app = SelectaApp(music_dir=demo_dir)

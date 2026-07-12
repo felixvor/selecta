@@ -237,3 +237,45 @@ def test_rank_bridge_bpm_filter(synthetic_library):
     results = rank_bridge(a, b, synthetic_library, bpm_offset=7)  # nur >= 131
     filepaths = {r["track"]["filepath"] for r in results}
     assert filepaths == {"house_fast.mp3", "techno.mp3"}
+
+
+# --- Energie-Achse: z-normierte Subspace-Distanz ------------------------------
+
+def test_energy_mood_distance_ignoriert_danceable_und_valence():
+    # Bei aktiver Energie zaehlen nur die verschobenen Dimensionen --
+    # ein Unterschied allein in danceable/valence kostet nichts.
+    import numpy as np
+    from selecta.similarity import energy_mood_distance
+
+    scales = np.ones(5, dtype=np.float32)
+    a = np.array([0.5, 0.5, 0.1, 0.5, 0.2], dtype=np.float32)
+    b = np.array([0.5, 0.5, 0.9, 0.5, 0.8], dtype=np.float32)
+    assert energy_mood_distance(a, b, scales) == 0.0
+
+
+def test_energy_null_ranking_unveraendert(synthetic_library):
+    # energy == 0 nutzt weiter die rohe 5-dim-Distanz -- das Default-Ranking
+    # darf sich durch die Energie-Umbauten nicht bewegen.
+    from tests.conftest import get_track
+    from selecta.similarity import rank_similar
+
+    query = get_track(synthetic_library, "house_a.mp3")
+    results = rank_similar(query, synthetic_library, energy=0)
+    assert results[0]["track"]["filepath"] == "house_b.mp3"
+
+
+def test_energie_hoch_bevorzugt_energetischen_track(synthetic_library):
+    from tests.conftest import get_track
+    from selecta.similarity import rank_similar
+
+    query = get_track(synthetic_library, "house_a.mp3")
+
+    def pos(results, path):
+        return next(i for i, r in enumerate(results) if r["track"]["filepath"] == path)
+
+    up = rank_similar(query, synthetic_library, energy=4)
+    down = rank_similar(query, synthetic_library, energy=-4)
+    # Nach oben rueckt der schnelle/aggressive Track vor den Warmup-Track,
+    # nach unten umgekehrt.
+    assert pos(up, "house_fast.mp3") < pos(up, "house_slow.mp3")
+    assert pos(down, "house_slow.mp3") < pos(down, "house_fast.mp3")

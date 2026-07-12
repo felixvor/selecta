@@ -43,6 +43,9 @@ from .config import (
     SCORE_COLOR_STEPS,
     TAG_SEPARATOR,
     TOP_N,
+    W_BPM,
+    W_KEY,
+    W_MOOD,
 )
 from .library import Library, dir_status, fuzzy_search, track_label
 from .similarity import (
@@ -261,6 +264,31 @@ def fmt_detail_line(track: dict) -> str:
     )
 
 
+def fmt_why_line(result: dict) -> str:
+    """Score-Zerlegung fuer die Detail-Zeile im Ergebnis-Modus: dieselben
+    Terme wie _combined_score, als lesbare Rechnung. Der groesste Abzug
+    traegt orange, Nullen/Neutrales ist gedimmt -- so liest man beim
+    Cursor-Bewegen direkt ab, WAS einen Kandidaten nach unten drueckt
+    (und beim Tuning von W_BPM/W_KEY/W_MOOD deren Wirkung)."""
+    costs = {
+        "bpm": None if result.get("bpm_pen") is None else W_BPM * min(result["bpm_pen"], 1.0),
+        "key": None if result.get("key_pen") is None else W_KEY * (result["key_pen"] / 8.0),
+        "mood": W_MOOD * ((result.get("mood_dist") or 0.0) / 2.5),
+    }
+    known = [v for v in costs.values() if v is not None]
+    biggest = max(known) if known else 0.0
+    parts = [f"score [b]{result['score']:.3f}[/]  =  cos {result['cos_sim']:.3f}"]
+    for name, v in costs.items():
+        if v is None:
+            parts.append(f"[dim]− {name} ?[/]")  # kein BPM/Key-Wert -> neutral
+        elif v < 0.005 or v < biggest:
+            style = "dim" if v < 0.005 else ""
+            parts.append(f"[{style or 'white'}]− {name} {v:.2f}[/]")
+        else:
+            parts.append(f"[orange1]− {name} {v:.2f}[/]")
+    return "  ".join(parts) + f"   [dim]{result['track']['filepath']}[/]"
+
+
 def query_title(track: dict) -> str:
     bpm = track.get("bpm") or "?"
     return f"Similar to: {track_label(track)}  [{bpm} BPM | {display_key(track)}]"
@@ -365,6 +393,9 @@ class MainScreen(Screen):
         self.energy = 0
         self.bpm_offset = 0
         self._row_tracks: list[dict] = []
+        # Result-Dicts parallel zu _row_tracks (nur im Similarity-Modus) --
+        # Quelle der Score-Zerlegung in der Detail-Zeile.
+        self._row_results: list[dict] | None = None
         self._results_shown = False
         self._status_cache: tuple[int, int] | None = None
 
@@ -387,7 +418,7 @@ class MainScreen(Screen):
         table.zebra_stripes = True
         self.query_one("#logo", Static).update(Text(LOGO, style="bold magenta"))
         self.query_one("#keybar", Static).update(
-            "[b]Enter[/b] select  [b]↑↓[/b] navigate  [b]←→[/b] energy  [b],[/b][b].[/b] BPM filter  "
+            "[b]Enter[/b] select+copy  [b]↑↓[/b] navigate  [b]←→[/b] energy  [b],[/b][b].[/b] BPM filter  "
             "[b]^a[/b] analyze  [b]^t[/b] transition  [b]^l[/b] libraries  [b]Esc[/b] clear  [b]^c[/b] quit"
         )
         self._update_header()
@@ -482,13 +513,14 @@ class MainScreen(Screen):
 
     # --- Listen-Befuellung ---
 
-    def _fill_table(self, columns, rows, tracks, border_title, heights=None):
+    def _fill_table(self, columns, rows, tracks, border_title, heights=None, results=None):
         table = self.query_one(ResultsTable)
         table.clear(columns=True)
         table.add_columns(*columns)
         for i, row in enumerate(rows):
             table.add_row(*row, height=heights[i] if heights else 1)
         self._row_tracks = tracks
+        self._row_results = results
         if tracks:
             table.move_cursor(row=0)
         table.border_title = border_title
@@ -548,7 +580,7 @@ class MainScreen(Screen):
         title = query_title(q)
         if self.bpm_offset and not results:
             title += "  — 0 matches within BPM filter"
-        self._fill_table(RESULT_COLUMNS, rows, tracks, title, heights)
+        self._fill_table(RESULT_COLUMNS, rows, tracks, title, heights, results=results)
 
     def _show_bridge_results(self) -> None:
         """Transition-Modus: Kandidaten zwischen Query (A) und Ziel (B),
@@ -586,10 +618,15 @@ class MainScreen(Screen):
     def _update_detail(self) -> None:
         detail = self.query_one("#detail", Static)
         table = self.query_one(ResultsTable)
-        if self._row_tracks and 0 <= table.cursor_row < len(self._row_tracks):
-            detail.update(fmt_detail_line(self._row_tracks[table.cursor_row]))
-        else:
+        row = table.cursor_row
+        if not self._row_tracks or not (0 <= row < len(self._row_tracks)):
             detail.update("[dim]no selection[/]")
+        elif self._row_results is not None and row < len(self._row_results):
+            # Ergebnis-Modus: Score-Zerlegung statt roher Mood-Werte --
+            # die stehen als Deltas ohnehin in den Spalten.
+            detail.update(fmt_why_line(self._row_results[row]))
+        else:
+            detail.update(fmt_detail_line(self._row_tracks[row]))
 
     # --- Auswahl ---
 
@@ -611,6 +648,9 @@ class MainScreen(Screen):
             self.query_track = track
         else:
             self.query_track = track
+        # Label in die System-Zwischenablage (OSC-52, geht durch WSL/SSH) --
+        # der natuerliche naechste Handgriff ist die Suche im DJ-Tool.
+        self.app.copy_to_clipboard(track_label(track))
         with search.prevent(Input.Changed):
             search.value = ""
         search.focus()
@@ -817,6 +857,10 @@ class AnalyzeModal(ModalScreen):
         self._cancelled = False
         self._current_name = ""  # Track der Live-Statuszeile (::status track)
         self._proc: asyncio.subprocess.Process | None = None
+        # Live-Zaehler aus den done-Events -- der statische "X of Y analyzed"-
+        # Satz aus dem Confirm-Zustand wuerde waehrend des Laufs luegen
+        # (er aenderte sich nie); waehrend des Laufs zaehlt diese Zeile mit.
+        self._counts = {"full": 0, "tags": 0, "complete": 0, "error": 0}
 
     def compose(self) -> ComposeResult:
         with Vertical(id="analyze-box"):
@@ -929,6 +973,22 @@ class AnalyzeModal(ModalScreen):
         elif kind == "done":
             current.update("")
             log.write(fmt_analysis_log_line(event))
+            self._counts[event.get("kind", "complete")] = (
+                self._counts.get(event.get("kind", "complete"), 0) + 1
+            )
+            self._update_live_counts()
+
+    def _update_live_counts(self) -> None:
+        c = self._counts
+        scanned = sum(c.values())
+        parts = [f"[b]{scanned}[/b] scanned", f"{c['full']} analyzed"]
+        if c["tags"]:
+            parts.append(f"{c['tags']} backfilled")
+        parts.append(f"{c['complete']} complete")
+        if c["error"]:
+            parts.append(f"[red]{c['error']} errors[/red]")
+        dirs = "\n".join(f"[dim]{escape(str(d))}[/]" for d in self._music_dirs)
+        self.query_one("#analyze-info", Static).update(f"{dirs}\n{' · '.join(parts)}")
 
     def action_close_or_cancel(self) -> None:
         if self._state == "running":

@@ -170,3 +170,41 @@ def test_analyzer_stages_passen_zur_stage_anzahl():
 
     assert len(EssentiaAnalyzer.STAGES) == 6
     assert len(set(EssentiaAnalyzer.STAGES)) == 6
+
+
+# --- BPM/Key-Fallback im Voll-Analyse-Pfad ------------------------------------
+
+def test_voll_analyse_rechnet_fehlende_bpm_und_key_selbst(tmp_path, monkeypatch):
+    """Regression: Frueher fuellte erst der ZWEITE Lauf BPM/Key nach (der
+    Fallback lebte nur im tags-Pfad) -- im Analyselog stand '? BPM ?'.
+    Jetzt rechnet schon die Voll-Analyse selbst, wenn die Datei keine
+    DJ-Tags traegt."""
+    import selecta.analysis as analysis
+    from selecta.analysis import run_analysis
+
+    class FakeAnalyzer:
+        def __init__(self, models_dir):
+            pass
+
+        def analyze(self, filepath, stage=None):
+            return {"embedding": "AAAA", "effnet_embedding": "AAAA",
+                    "genres": "Techno", "vibes": "", "arousal": 6.0,
+                    "aggressive": 0.5, "danceable": 0.9}
+
+    monkeypatch.setattr(analysis, "EssentiaAnalyzer", FakeAnalyzer)
+    monkeypatch.setattr(analysis, "download_models", lambda *a, **k: None)
+    monkeypatch.setattr(analysis, "compute_bpm", lambda fp: "133.7")
+    monkeypatch.setattr(analysis, "compute_key", lambda fp: "9m")
+
+    music_dir = tmp_path / "musik"
+    music_dir.mkdir()
+    (music_dir / "untagged.mp3").write_bytes(b"")  # keine ID3-Tags lesbar
+
+    events = []
+    done, errors = run_analysis(music_dir, tmp_path / "models",
+                                log=lambda _msg: None, status=events.append)
+    assert (done, errors) == (1, 0)
+    full = next(e for e in events if e["event"] == "done" and e["kind"] == "full")
+    assert full["bpm"] == "133.7"
+    assert full["key"] == "9m"
+    assert full["key_estimated"] == "1"
