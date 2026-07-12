@@ -51,6 +51,7 @@ from .library import Library, dir_status, fuzzy_search, track_label
 from .similarity import (
     harmonic_distance,
     pair_score,
+    parse_key,
     rank_bridge,
     rank_similar,
     relative_bpm_distance,
@@ -275,12 +276,27 @@ def fmt_why_line(result: dict) -> str:
         "key": None if result.get("key_pen") is None else W_KEY * (result["key_pen"] / 8.0),
         "mood": W_MOOD * ((result.get("mood_dist") or 0.0) / 2.5),
     }
+    # None heisst neutral -- aber WER den Wert nicht hat, macht den
+    # Unterschied: fehlt er dem Kandidaten, ist '?' eine Eigenschaft dieser
+    # Zeile (gelb); hat die QUERY keinen Wert, ist der Term fuer ALLE
+    # Zeilen neutral und wird nur gedimmt ausgelassen ('–') -- sonst sieht
+    # eine Liste voller '?' nach Bug aus, obwohl nur der Query-Track
+    # keinen Tag hat.
+    track = result["track"]
+    has_track_value = {
+        "bpm": _to_float(track.get("bpm")) is not None,
+        "key": parse_key(track.get("key") or "") is not None,
+        "mood": True,
+    }
     known = [v for v in costs.values() if v is not None]
     biggest = max(known) if known else 0.0
     parts = [f"score [b]{result['score']:.3f}[/]  =  cos {result['cos_sim']:.3f}"]
     for name, v in costs.items():
         if v is None:
-            parts.append(f"[dim]− {name} ?[/]")  # kein BPM/Key-Wert -> neutral
+            if has_track_value[name]:
+                parts.append(f"[dim]− {name} –[/]")  # Query-seitig kein Wert
+            else:
+                parts.append(f"[yellow]− {name} ?[/]")  # Track hat keinen Wert
         elif v < 0.005 or v < biggest:
             style = "dim" if v < 0.005 else ""
             parts.append(f"[{style or 'white'}]− {name} {v:.2f}[/]")

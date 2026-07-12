@@ -208,3 +208,30 @@ def test_voll_analyse_rechnet_fehlende_bpm_und_key_selbst(tmp_path, monkeypatch)
     assert full["bpm"] == "133.7"
     assert full["key"] == "9m"
     assert full["key_estimated"] == "1"
+
+
+def test_tag_pfad_parallel_liefert_gleiche_events(tmp_path):
+    """Der parallele Tag-Pfad (workers=2, ProcessPoolExecutor) liefert
+    dieselben done-Events in derselben (Submit-)Reihenfolge wie der
+    sequenzielle -- geschrieben wird nur im Hauptprozess."""
+    from selecta.analysis import run_analysis
+    from selecta.library import compact_csv
+    from tests.conftest import make_row
+
+    music_dir = tmp_path / "musik"
+    music_dir.mkdir()
+    rows = {}
+    for name in ("a.mp3", "b.mp3", "c.mp3"):
+        track = music_dir / name
+        track.write_bytes(b"")
+        rows.update(dict([make_row(str(track), "X", name, 124, "7m", [1, 0, 0])]))
+    compact_csv(music_dir / "library_analysis.csv", rows)
+
+    events = []
+    done, errors = run_analysis(music_dir, tmp_path / "models",
+                                log=lambda _msg: None, status=events.append,
+                                workers=2)
+    assert (done, errors) == (0, 0)
+    dones = [e for e in events if e["event"] == "done"]
+    assert [e["kind"] for e in dones] == ["complete"] * 3
+    assert [e["name"] for e in dones] == ["a.mp3", "b.mp3", "c.mp3"]

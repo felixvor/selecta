@@ -217,6 +217,19 @@ class Library:
                 track["filepath"] = filepath
                 track["_embedding"] = decode_embedding(row["embedding"])
                 self.tracks.append(track)
+        # Gemischte Embedding-Dimensionen (z.B. CSV-Zeilen aus der Zeit vor
+        # einem Modellwechsel) wuerden np.stack crashen und damit die ganze
+        # App beim Laden reissen. Mehrheits-Dimension gewinnt, der Rest
+        # gilt als nicht analysiert (faellt beim naechsten Lauf in die
+        # Voll-Analyse, weil seine Zeile hier nicht mitspielt).
+        if self.tracks:
+            dim_counts: dict[int, int] = {}
+            for t in self.tracks:
+                d = t["_embedding"].shape[0]
+                dim_counts[d] = dim_counts.get(d, 0) + 1
+            if len(dim_counts) > 1:
+                keep = max(dim_counts, key=lambda d: dim_counts[d])
+                self.tracks = [t for t in self.tracks if t["_embedding"].shape[0] == keep]
         self.labels = [track_label(t) for t in self.tracks]
         if self.tracks:
             m = np.stack([t["_embedding"] for t in self.tracks]).astype(np.float32)

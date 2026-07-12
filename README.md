@@ -8,7 +8,7 @@ A terminal tool for set preparation and live DJing: finds the right next track w
 
 - **Your music, wherever it came from.** SELECTA listens to the audio
   signal, not to catalog metadata. Bandcamp purchases, rips, your own
-  unreleased tracks — all treated equally, no Beatport entry required.
+  unreleased tracks - all treated equally.
 - **Local & offline.** Analysis and search run on your own machine, no
   cloud, no account.
 - **SOTA models, lightweight.** Embeddings contrastively trained on track

@@ -1,5 +1,7 @@
 """Zentrale Konstanten: Modelle, CSV-Schema, Ranking-Gewichte, Energie-Stufen."""
 
+import os
+
 MODELS_BASE = "https://essentia.upf.edu/models"
 
 MODEL_FILES = {
@@ -32,6 +34,15 @@ MAX_DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_TIMEOUT_SECONDS = 30
 
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".wav", ".m4a", ".aiff", ".aif", ".ogg"}
+
+# Parallele Worker fuer den billigen Tag-/BPM-/Key-Pfad (Prozesse, kein TF):
+# RhythmExtractor/KeyExtractor sind single-threaded, der Audio-Decode von
+# /mnt/* ist I/O-lastig -- Parallelitaet skaliert hier fast linear.
+# Halbe Kernzahl: Hyperthreading bringt bei DSP wenig, und der Rechner
+# bleibt waehrend eines Backfills benutzbar. Die teure Voll-Analyse bleibt
+# bewusst sequenziell (TensorFlow parallelisiert einen Forward-Pass intern
+# schon ueber die Kerne, mehr Prozesse = nur mehr RAM und Modell-Ladezeit).
+ANALYSIS_WORKERS = max(1, (os.cpu_count() or 2) // 2)
 
 # Fester Dateiname pro Musik-Ordner -- 'analyze' und die Suche verwenden
 # denselben, dadurch braucht es nie eine separate CSV-Pfad-Eingabe.

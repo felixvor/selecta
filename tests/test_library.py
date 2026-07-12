@@ -166,3 +166,24 @@ def test_fuzzy_search_cutoff_und_limit():
     from selecta.library import fuzzy_search
     assert fuzzy_search("zzz nicht vorhanden qqq", LABELS) == []
     assert len(fuzzy_search("kolter", LABELS, limit=2)) == 2
+
+
+def test_gemischte_embedding_dimensionen_crashen_nicht(tmp_path):
+    """Regression: Zeilen mit abweichender Embedding-Dimension (z.B. nach
+    einem Modellwechsel) haben np.stack und damit den App-Start gecrasht.
+    Die Mehrheits-Dimension gewinnt, der Rest wird ignoriert."""
+    from selecta.library import Library, compact_csv
+    from tests.conftest import make_row
+
+    rows = dict([
+        make_row("a.mp3", "A", "One", 124, "7m", [1.0, 0.0, 0.0]),
+        make_row("b.mp3", "B", "Two", 126, "8m", [0.9, 0.1, 0.0]),
+        make_row("c.mp3", "C", "Odd", 128, "9m", [0.5] * 512),
+    ])
+    music_dir = tmp_path / "musik"
+    music_dir.mkdir()
+    compact_csv(music_dir / "library_analysis.csv", rows)
+
+    lib = Library(music_dir)
+    assert len(lib.tracks) == 2
+    assert lib.matrix.shape == (2, 3)

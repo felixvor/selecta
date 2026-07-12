@@ -143,6 +143,12 @@ _CLUSTERS = {
                 "Ambient|Drone", "Breaks|Downtempo"],
                ["dreamy|calm", "deep|meditative", "warm|melodic", "space", "fun|retro"],
                (2010, 2023)),
+    "dnb": ([0.22, 0.90, 0.16], (170, 176), (6.5, 7.8), (0.40, 0.75), (0.15, 0.45),
+            ["Drum n Bass", "Drum n Bass|Jungle", "Liquid Funk", "Neurofunk"],
+            ["energetic|fast", "dark|heavy", "melodic|uplifting"], (2004, 2025)),
+    "disco": ([0.90, 0.14, 0.30], (105, 122), (4.8, 6.4), (0.05, 0.25), (0.55, 0.85),
+              ["Disco", "Disco|Edits", "Nu-Disco", "Funk|Disco"],
+              ["fun|groovy", "retro|happy", "sexy|groovy", "upbeat"], (1977, 2024)),
 }
 
 
@@ -178,16 +184,31 @@ def _generate_tracks(rng, cluster_counts):
     return tracks
 
 
-def create_demo_library(target_dir, tracks=DEMO_TRACKS) -> Path:
-    """Legt den Demo-Ordner an (idempotent) und liefert seinen Pfad."""
+def _pad512(emb) -> np.ndarray:
+    """3-dim-Cluster-Vektor -> 512-dim (Rest 0). Noetig, seit die Demo-Crate
+    auch ECHT analysierte Dateien enthalten kann (--seed-audio): deren
+    Embeddings sind 512-dim, und gemischte Dimensionen fliegen aus der
+    Library (Mehrheits-Dimension gewinnt). Cosine innerhalb der Demo-Tracks
+    aendert sich durch Zero-Padding nicht."""
+    vec = np.zeros(512, dtype=np.float32)
+    vec[: len(emb)] = emb
+    return vec
+
+
+def create_demo_library(target_dir, tracks=DEMO_TRACKS, csv_skip=0) -> Path:
+    """Legt den Demo-Ordner an (idempotent) und liefert seinen Pfad.
+    csv_skip: so viele Tracks bekommen KEINE CSV-Zeile (Dateien ohne
+    Analyse -- fuer offene/unanalysierte Ordner im Launcher-Bild)."""
     target_dir = Path(target_dir).resolve()
     target_dir.mkdir(parents=True, exist_ok=True)
     rows = {}
-    for (artist, title, bpm, key, emb, genres, vibes, year,
-         arousal, aggressive, relaxed, danceable, valence) in tracks:
+    for i, (artist, title, bpm, key, emb, genres, vibes, year,
+            arousal, aggressive, relaxed, danceable, valence) in enumerate(tracks):
         filepath = target_dir / f"{artist} - {title}.mp3"
         filepath.touch()
-        encoded = encode_embedding(np.array(emb, dtype=np.float32))
+        if i < csv_skip:
+            continue
+        encoded = encode_embedding(_pad512(emb))
         rows[str(filepath)] = {
             "artist": artist, "title": title, "bpm": str(bpm), "key": key,
             "error": "", "embedding": encoded, "effnet_embedding": encoded,
@@ -216,7 +237,89 @@ def create_demo_crates(base_dir) -> tuple[Path, Path]:
     )
 
 
+# 7 Libraries in Echteinsatz-Groesse fuers Demo-GIF: (name, aktiv,
+# cluster-mix, csv_skip). csv_skip > 0 laesst Dateien unanalysiert
+# (gelber/roter Status im Launcher -- eine gewachsene Sammlung ist nie
+# komplett durchanalysiert). House/Techno sind die aktiven Sets.
+DEMO_UNIVERSE = [
+    ("House", True, {"deep": 300, "tech": 248, "techno": 120}, 0),
+    ("Techno & Peaktime", True, {"techno": 418}, 0),
+    ("Warmup & Downtempo", False, {"warmup": 195}, 18),
+    ("Drum & Bass", False, {"dnb": 241}, 0),
+    ("Ambient & Listening", False, {"warmup": 154}, 0),
+    ("Disco & Edits", False, {"disco": 96}, 0),
+    ("Crates/Festival 2026", False, {"tech": 42}, 42),
+]
+
+
+def create_demo_universe(base_dir) -> list[tuple[Path, bool]]:
+    """Alle 7 Demo-Libraries unter base_dir; Rueckgabe [(pfad, aktiv)].
+    Die kuratierten Anker-Tracks liegen in House (velvet/pressure-Suchen
+    aus make_screens/demo.tape) bzw. Warmup & Downtempo."""
+    import random
+    base = Path(base_dir).resolve()
+    rng = random.Random(2026)
+    out = []
+    for name, active, mix, skip in DEMO_UNIVERSE:
+        tracks = _generate_tracks(rng, mix)
+        if name == "House":
+            tracks = DEMO_TRACKS + tracks
+        elif name == "Warmup & Downtempo":
+            tracks = WARMUP_TRACKS + tracks
+        out.append((create_demo_library(base / name, tracks=tracks, csv_skip=skip), active))
+    return out
+
+
+def seed_real_audio(crate_dir: Path, source_dir: Path, count: int = 4) -> None:
+    """Kopiert ein paar ECHTE Audiodateien in die Crate -- umbenannt auf
+    fiktive Artist/Titel-Namen und mit gestrippten ID3-Tags, OHNE CSV-Zeile.
+
+    Zweck: Im Demo-GIF soll der Analyse-Lauf echte ✓-Ergebniszeilen mit
+    Genre-Chips zeigen (die leeren Dummy-Dateien koennen nur '≡ complete').
+    Ohne Tags faellt der Titel auf den fiktiven Dateinamen zurueck und
+    BPM/Key werden sichtbar selbst geschaetzt (~-Praefix). Die Quelle
+    bleibt privat -- ins Repo kommt nur das gerenderte GIF."""
+    import random
+    import shutil
+
+    rng = random.Random(7)
+    candidates = sorted(p for p in Path(source_dir).rglob("*.mp3"))
+    names = [
+        "Velour System - Copper Skyline", "Nyra Falk - Half Past Blue",
+        "Bassment Trust - Late Checkout", "Mio Navarro - Glasshouse Dub",
+        "Grey Harbour - Nocturne Nineteen", "Tape Loop City - Border Lights",
+    ]
+    for i, src in enumerate(rng.sample(candidates, min(count, len(candidates)))):
+        dest = crate_dir / f"{names[i % len(names)]}.mp3"
+        shutil.copyfile(src, dest)
+        try:
+            from mutagen.id3 import ID3
+            tags = ID3(str(dest))
+            tags.delete(str(dest))
+        except Exception:
+            pass
+
+
 if __name__ == "__main__":
     base = sys.argv[1] if len(sys.argv) > 1 else "demo_library"
-    for crate in create_demo_crates(base):
-        print(crate)
+    universe = create_demo_universe(base)
+    house = universe[0][0]
+    # Optional: --seed-audio QUELLE [N] mischt echte Dateien in die
+    # House-Crate (fuer den Analyse-Teil des Demo-GIFs, siehe demo.tape).
+    if "--seed-audio" in sys.argv:
+        idx = sys.argv.index("--seed-audio")
+        source = sys.argv[idx + 1]
+        count = int(sys.argv[idx + 2]) if len(sys.argv) > idx + 2 else 4
+        seed_real_audio(house, Path(source), count)
+    # --state DIR: libraries.json fuer ein isoliertes HOME schreiben (das
+    # Demo-GIF startet im Launcher, ohne die echte Nutzer-Config anzufassen).
+    if "--state" in sys.argv:
+        import json
+        state_home = Path(sys.argv[sys.argv.index("--state") + 1])
+        cfg = state_home / ".local" / "share" / "selecta"
+        cfg.mkdir(parents=True, exist_ok=True)
+        (cfg / "libraries.json").write_text(json.dumps({"libraries": [
+            {"path": str(path), "active": active} for path, active in universe
+        ]}), encoding="utf-8")
+    for path, active in universe:
+        print(("[x] " if active else "[ ] ") + str(path))

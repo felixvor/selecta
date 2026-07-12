@@ -328,6 +328,67 @@ class EssentiaAnalyzer:
         }
 
 
+def _tags_job(job) -> dict:
+    """Worker fuer den parallelen Tag-Pfad (laeuft in einem eigenen Prozess,
+    ProcessPoolExecutor): liest die Datei-Tags und berechnet BPM/Key nur,
+    wenn weder CSV noch Tag einen Wert haben. Kein TensorFlow -- nur
+    RhythmExtractor/KeyExtractor, deshalb billig genug pro Prozess.
+
+    job: (filepath_str, bpm_aus_csv, key_aus_csv). Rueckgabe ist rein
+    deklarativ (was wurde gelesen/berechnet); die Entscheidung, was in die
+    CSV geht, und das Schreiben selbst bleiben im Hauptprozess -- es gibt
+    genau EINEN CSV-Schreiber."""
+    filepath_str, cur_bpm, cur_key = job
+    filepath = Path(filepath_str)
+    t0 = time.time()
+    out = {"filepath": filepath_str, "fresh": read_existing_tags(filepath),
+           "bpm_computed": "", "key_computed": "",
+           "bpm_error": "", "key_error": ""}
+    if not (out["fresh"].get("bpm") or cur_bpm):
+        try:
+            out["bpm_computed"] = compute_bpm(filepath)
+        except Exception as e:
+            out["bpm_error"] = str(e)
+    if not (out["fresh"].get("key") or cur_key):
+        try:
+            out["key_computed"] = compute_key(filepath)
+        except Exception as e:
+            out["key_error"] = str(e)
+    out["secs"] = time.time() - t0
+    return out
+
+
+def _merge_tags_result(row: dict, result: dict, log) -> bool:
+    """Worker-Ergebnis in die CSV-Zeile mergen -- exakt dieselben Regeln wie
+    der sequenzielle Pfad: Datei-Tags gewinnen immer (Key-Tag loescht das
+    Schaetz-Flag), Berechnetes fuellt nur Luecken."""
+    fresh = result["fresh"]
+    changed = False
+    if fresh.get("bpm") and fresh["bpm"] != row.get("bpm"):
+        row["bpm"] = fresh["bpm"]
+        changed = True
+    if fresh.get("key") and fresh["key"] != row.get("key"):
+        row["key"] = fresh["key"]
+        row["key_estimated"] = ""
+        changed = True
+    if fresh.get("year") and fresh["year"] != row.get("year"):
+        row["year"] = fresh["year"]
+        changed = True
+    if result["bpm_computed"] and not row.get("bpm"):
+        row["bpm"] = result["bpm_computed"]
+        changed = True
+    if result["key_computed"] and not row.get("key"):
+        row["key"] = result["key_computed"]
+        row["key_estimated"] = "1"
+        changed = True
+    name = Path(result["filepath"]).name
+    if result["bpm_error"]:
+        log(f"Could not determine BPM for {name}: {result['bpm_error']}")
+    if result["key_error"]:
+        log(f"Could not determine key for {name}: {result['key_error']}")
+    return changed
+
+
 def _fill_missing_bpm_key(row: dict, filepath: Path, log) -> bool:
     """Fehlende BPM/Key-Werte selbst berechnen (Fallback ohne TF-Modelle).
 
@@ -399,7 +460,8 @@ def _human_line(info: dict) -> str:
             f" dance {info['danceable']}  ({info['secs']}s)")
 
 
-def run_analysis(music_dir, models_dir, log=print, progress=None, cancelled=None, status=None):
+def run_analysis(music_dir, models_dir, log=print, progress=None, cancelled=None,
+                 status=None, workers=None):
     """Analysiert alle Audiodateien in music_dir (Resume ueber die CSV).
 
     Jede Datei im Ordner wird durchlaufen und geloggt -- auch wenn sie
@@ -424,9 +486,19 @@ def run_analysis(music_dir, models_dir, log=print, progress=None, cancelled=None
         stattdessen als lesbare Zeilen ueber log() ausgegeben -- die TUI
         nutzt status (via --porcelain), der headless-Lauf log.
 
+    workers: Prozesse fuer den billigen Tag-Pfad (Default
+        config.ANALYSIS_WORKERS). Die Voll-Analysen laufen davor immer
+        sequenziell (TensorFlow nutzt die Kerne intern schon); CSV
+        schreibt ausschliesslich der Hauptprozess, und die Ergebnisse
+        werden in Submit-Reihenfolge eingesammelt -- Log und CSV bleiben
+        deterministisch sortiert, nur eben parallel berechnet.
+
     Rueckgabe: (neu_analysiert, fehler) -- zaehlt nur Dateien, an denen
     tatsaechlich etwas berechnet wurde, nicht die bereits vollstaendigen.
     """
+    from .config import ANALYSIS_WORKERS
+    if workers is None:
+        workers = ANALYSIS_WORKERS
     music_dir = Path(music_dir)
     models_dir = Path(models_dir)
     csv_path = csv_path_for(music_dir)
@@ -472,81 +544,97 @@ def run_analysis(music_dir, models_dir, log=print, progress=None, cancelled=None
         if not csv_exists:
             writer.writeheader()
 
-        for filepath, missing in todo:
+        def make_row(filepath):
+            existing = csv_data.get(str(filepath)) or {}
+            return {"filepath": str(filepath),
+                    **{k: existing.get(k, "") for k in CSV_FIELDNAMES[1:]}}
+
+        def finish_tags(filepath, row, changed, secs):
+            nonlocal scanned, analyzed
+            scanned += 1
+            if changed:
+                emit_done("tags", filepath, row, secs)
+                writer.writerow(row)
+                f.flush()
+                analyzed += 1
+            else:
+                emit_done("complete", filepath, row, secs)
+            if progress:
+                progress(scanned, len(all_files))
+
+        # --- Phase 1: Voll-Analysen, sequenziell (TensorFlow nutzt die
+        # Kerne pro Forward-Pass schon selbst) ---------------------------
+        full_files = [fp for fp, missing in todo if "embedding" in missing]
+        tag_files = [fp for fp, missing in todo if "embedding" not in missing]
+
+        for filepath in full_files:
             if cancelled and cancelled():
                 log("Cancelled -- tracks analyzed so far are saved.")
                 break
 
             t0 = time.time()
-            existing = csv_data.get(str(filepath)) or {}
-            row = {"filepath": str(filepath), **{k: existing.get(k, "") for k in CSV_FIELDNAMES[1:]}}
-
-            if "embedding" in missing:
-                if status:
-                    status({"event": "track", "index": scanned + 1,
-                            "total": len(all_files), "name": filepath.name})
-                try:
-                    row.update(read_existing_tags(filepath))
-                    row.update(analyzer.analyze(filepath, stage=stage_cb))
-                    # Die TF-Heads liefern kein BPM/Key -- hat die Datei
-                    # keine DJ-Tags, hier direkt selbst rechnen, sonst
-                    # zeigt der Lauf '?' und erst der zweite Lauf fuellt auf.
-                    _fill_missing_bpm_key(row, filepath, log)
-                    row["error"] = ""
-                except Exception as e:
-                    row = {k: "" for k in CSV_FIELDNAMES}
-                    row["filepath"] = str(filepath)
-                    row["error"] = str(e)
-                    errors += 1
-                    emit_done("error", filepath, row, time.time() - t0)
-                    writer.writerow(row)
-                    f.flush()
-                    scanned += 1
-                    analyzed += 1
-                    if progress:
-                        progress(scanned, len(all_files))
-                    continue
-
+            row = make_row(filepath)
+            if status:
+                status({"event": "track", "index": scanned + 1,
+                        "total": len(all_files), "name": filepath.name})
+            try:
+                row.update(read_existing_tags(filepath))
+                row.update(analyzer.analyze(filepath, stage=stage_cb))
+                # Die TF-Heads liefern kein BPM/Key -- hat die Datei
+                # keine DJ-Tags, hier direkt selbst rechnen, sonst
+                # zeigt der Lauf '?' und erst der zweite Lauf fuellt auf.
+                _fill_missing_bpm_key(row, filepath, log)
+                row["error"] = ""
                 emit_done("full", filepath, row, time.time() - t0)
-                writer.writerow(row)
-                f.flush()
-                scanned += 1
-                analyzed += 1
-                if progress:
-                    progress(scanned, len(all_files))
-                continue
-
-            # Kein Embedding noetig -- trotzdem bei JEDER Datei pruefen, ob
-            # DJ-Software (Rekordbox/Traktor) inzwischen einen BPM/Key-Tag
-            # gesetzt oder geaendert hat. Deren Analyse gilt als hochwertiger
-            # als unsere eigene Schaetzung und gewinnt daher immer, wenn ein
-            # Tag vorhanden ist -- nicht nur als Luecken-Fuellung.
-            fresh_tags = read_existing_tags(filepath)
-            changed = False
-            if fresh_tags.get("bpm") and fresh_tags["bpm"] != row.get("bpm"):
-                row["bpm"] = fresh_tags["bpm"]
-                changed = True
-            if fresh_tags.get("key") and fresh_tags["key"] != row.get("key"):
-                # Tag gewinnt auch ueber eine fruehere eigene Schaetzung --
-                # das Flag faellt, der Wert gilt ab jetzt als verlaesslich.
-                row["key"] = fresh_tags["key"]
-                row["key_estimated"] = ""
-                changed = True
-            if fresh_tags.get("year") and fresh_tags["year"] != row.get("year"):
-                row["year"] = fresh_tags["year"]
-                changed = True
-
-            changed = _fill_missing_bpm_key(row, filepath, log) or changed
-
+            except Exception as e:
+                row = {k: "" for k in CSV_FIELDNAMES}
+                row["filepath"] = str(filepath)
+                row["error"] = str(e)
+                errors += 1
+                emit_done("error", filepath, row, time.time() - t0)
+            writer.writerow(row)
+            f.flush()
             scanned += 1
-            if changed:
-                emit_done("tags", filepath, row, time.time() - t0)
-                writer.writerow(row)
-                f.flush()
-                analyzed += 1
-            else:
-                emit_done("complete", filepath, row, time.time() - t0)
+            analyzed += 1
             if progress:
                 progress(scanned, len(all_files))
+
+        # --- Phase 2: Tag-Re-Check/Backfill fuer alle uebrigen Dateien.
+        # Bei JEDER Datei pruefen, ob DJ-Software (Rekordbox/Traktor)
+        # inzwischen einen BPM/Key-Tag gesetzt oder geaendert hat -- deren
+        # Analyse gilt als hochwertiger und gewinnt immer, nicht nur als
+        # Luecken-Fuellung. Kein TF -> parallelisierbar (config.
+        # ANALYSIS_WORKERS); geschrieben wird nur hier im Hauptprozess. --
+        was_cancelled = cancelled and cancelled()
+        if tag_files and not was_cancelled:
+            jobs = [(str(fp), (csv_data.get(str(fp)) or {}).get("bpm", ""),
+                     (csv_data.get(str(fp)) or {}).get("key", "")) for fp in tag_files]
+            rows = {str(fp): make_row(fp) for fp in tag_files}
+
+            if workers <= 1 or len(tag_files) == 1:
+                for job in jobs:
+                    if cancelled and cancelled():
+                        log("Cancelled -- tracks analyzed so far are saved.")
+                        break
+                    result = _tags_job(job)
+                    filepath = Path(result["filepath"])
+                    row = rows[result["filepath"]]
+                    changed = _merge_tags_result(row, result, log)
+                    finish_tags(filepath, row, changed, result["secs"])
+            else:
+                from concurrent.futures import ProcessPoolExecutor
+                with ProcessPoolExecutor(max_workers=workers) as pool:
+                    futures = [pool.submit(_tags_job, job) for job in jobs]
+                    for future in futures:
+                        if cancelled and cancelled():
+                            log("Cancelled -- tracks analyzed so far are saved.")
+                            for fut in futures:
+                                fut.cancel()
+                            break
+                        result = future.result()
+                        filepath = Path(result["filepath"])
+                        row = rows[result["filepath"]]
+                        changed = _merge_tags_result(row, result, log)
+                        finish_tags(filepath, row, changed, result["secs"])
 
     return analyzed, errors

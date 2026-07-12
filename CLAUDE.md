@@ -127,6 +127,14 @@ liegt in `~/.local/share/selecta/libraries.json`.
   halten den GIL sekundenlang, ein Thread würde die TUI einfrieren. Das
   `AnalyzeModal` startet `python -m selecta analyze --porcelain` und streamt
   stdout.
+- **Nur der Tag-Pfad ist parallelisiert** (`config.ANALYSIS_WORKERS` =
+  Kerne/2, ProcessPoolExecutor in `run_analysis`): RhythmExtractor/
+  KeyExtractor sind single-threaded und I/O-lastig → skaliert fast linear.
+  Die Voll-Analyse bleibt bewusst sequenziell (TF parallelisiert einen
+  Forward-Pass intern schon; mehr Prozesse = nur mehr RAM/Modell-Ladezeit
+  und die Stage-Anzeige bräuchte ein Multi-Track-Konzept). CSV schreibt
+  ausschließlich der Hauptprozess; Ergebnisse werden in Submit-Reihenfolge
+  eingesammelt, Log/CSV bleiben deterministisch.
 - **Key wird geschätzt, aber sichtbar als Schätzung** (`compute_key`,
   Profil `config.KEY_PROFILE=edmm`, fest 440 Hz, Notation
   `config.KEY_NOTATION`): Der frühere Befund "KeyExtractor liegt zu 85 %
@@ -238,5 +246,11 @@ Build ohne WSL (Essentia-Ersatz nötig, Embeddings würden inkompatibel).
 GIF-Regenerierung: vhs/ttyd/ffmpeg liegen als statische Binaries in
 `~/.local/bin` (WSL, ohne sudo installiert); vhs' Chromium braucht
 `LD_LIBRARY_PATH=$HOME/.local/chromium-libs/usr/lib/x86_64-linux-gnu`
-(per apt-get download entpackte Libs, kein Systemeingriff). Ablauf:
-`python scripts/demo_library.py /tmp/selecta-demo && vhs scripts/demo.tape`.
+(per apt-get download entpackte Libs, kein Systemeingriff). Ablauf steht
+im Kopf von `scripts/demo.tape`: erst `demo_library.py ~/Music
+--seed-audio <echter Ordner> 4 --state /tmp/selecta-home` (7 Libraries
+in Echteinsatz-Groesse; die 4 Seeds sind echte, umbenannte und
+tag-gestrippte Dateien fuer den Analyse-Teil), dann `vhs
+scripts/demo.tape`. Vor JEDEM Re-Render demo_library.py neu ausfuehren
+(der Lauf im GIF schreibt die Seeds in die CSV). `~/Music` und
+`/tmp/selecta-home` sind reine Demo-Artefakte und koennen jederzeit weg.
