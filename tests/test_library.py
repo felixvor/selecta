@@ -4,6 +4,7 @@ from selecta.library import (
     Library,
     compact_csv,
     decode_embedding,
+    dir_status,
     encode_embedding,
     load_csv_data,
     track_label,
@@ -63,7 +64,7 @@ def test_library_status_zaehlt_dateien_im_ordner(tmp_path, synthetic_library):
     assert (analyzed, total) == (0, 0)
 
     # lege eine "analysierte" und eine neue Datei an
-    music_dir = synthetic_library.music_dir
+    music_dir = synthetic_library.music_dirs[0]
     (music_dir / "house_a.mp3").write_bytes(b"")
     (music_dir / "neu_dazu.mp3").write_bytes(b"")
     # CSV-Pfade sind relativ ("house_a.mp3"), Dateien absolut -- Library.status
@@ -73,6 +74,40 @@ def test_library_status_zaehlt_dateien_im_ordner(tmp_path, synthetic_library):
     lib = Library(music_dir)
     analyzed, total = lib.status()
     assert (analyzed, total) == (1, 2)
+
+
+def test_library_mehrere_ordner_werden_zusammengefuehrt(tmp_path):
+    dir_a = tmp_path / "house"
+    dir_a.mkdir()
+    dir_b = tmp_path / "techno"
+    dir_b.mkdir()
+    # derselbe absolute Pfad in beiden CSVs (verschachtelte Libraries):
+    # darf in der Suche nur einmal auftauchen
+    shared = str(tmp_path / "beide.mp3")
+    compact_csv(dir_a / "library_analysis.csv", dict([
+        make_row("a.mp3", "X", "A", 124, "7m", [1, 0, 0]),
+        make_row(shared, "X", "S", 130, "8m", [0, 1, 0]),
+    ]))
+    compact_csv(dir_b / "library_analysis.csv", dict([
+        make_row("b.mp3", "X", "B", 140, "2m", [0, 0, 1]),
+        make_row(shared, "X", "S", 130, "8m", [0, 1, 0]),
+    ]))
+
+    lib = Library([dir_a, dir_b])
+    assert sorted(t["filepath"] for t in lib.tracks) == sorted(["a.mp3", shared, "b.mp3"])
+    assert lib.matrix.shape == (3, 3)
+    # Einzelpfad (Ad-hoc-Modus) funktioniert weiterhin ohne Liste
+    assert len(Library(dir_a).tracks) == 2
+
+
+def test_dir_status_zaehlt_ohne_embeddings_zu_decodieren(tmp_path):
+    music_dir = tmp_path / "musik"
+    music_dir.mkdir()
+    (music_dir / "fertig.mp3").write_bytes(b"")
+    (music_dir / "neu.mp3").write_bytes(b"")
+    rows = dict([make_row(str(music_dir / "fertig.mp3"), "X", "A", 124, "7m", [1, 0, 0])])
+    compact_csv(music_dir / "library_analysis.csv", rows)
+    assert dir_status(music_dir) == (1, 2)
 
 
 def test_track_label_fallback_dateiname():

@@ -18,9 +18,16 @@ MODEL_FILES = {
     "approachability_regression-discogs-effnet-1.pb": f"{MODELS_BASE}/classification-heads/approachability/approachability_regression-discogs-effnet-1.pb",
     "engagement_regression-discogs-effnet-1.pb": f"{MODELS_BASE}/classification-heads/engagement/engagement_regression-discogs-effnet-1.pb",
     "deam-msd-musicnn-2.pb": f"{MODELS_BASE}/classification-heads/deam/deam-msd-musicnn-2.pb",
+    # Genre/Vibe-Tagging: 400 Discogs-Styles bzw. 56 Jamendo-Mood/Theme-Tags.
+    # Die .json-Dateien liefern die Klassennamen zu den Modell-Outputs.
+    "genre_discogs400-discogs-effnet-1.pb": f"{MODELS_BASE}/classification-heads/genre_discogs400/genre_discogs400-discogs-effnet-1.pb",
+    "genre_discogs400-discogs-effnet-1.json": f"{MODELS_BASE}/classification-heads/genre_discogs400/genre_discogs400-discogs-effnet-1.json",
+    "mtg_jamendo_moodtheme-discogs-effnet-1.pb": f"{MODELS_BASE}/classification-heads/mtg_jamendo_moodtheme/mtg_jamendo_moodtheme-discogs-effnet-1.pb",
+    "mtg_jamendo_moodtheme-discogs-effnet-1.json": f"{MODELS_BASE}/classification-heads/mtg_jamendo_moodtheme/mtg_jamendo_moodtheme-discogs-effnet-1.json",
 }
 
 MIN_MODEL_BYTES = 1024
+MIN_METADATA_BYTES = 128  # die .json-Label-Dateien sind deutlich kleiner als die Modelle
 MAX_DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_TIMEOUT_SECONDS = 30
 
@@ -36,6 +43,9 @@ CSV_FIELDNAMES = [
     "title",
     "bpm",
     "key",
+    "year",
+    "genres",
+    "vibes",
     "aggressive",
     "happy",
     "sad",
@@ -47,6 +57,13 @@ CSV_FIELDNAMES = [
     "arousal",
     "valence",
     "embedding",
+    # Gemitteltes discogs-effnet-Embedding (1280-dim), auf dem die
+    # Classification-Heads laufen. Persistiert, damit kuenftige neue Heads
+    # als reiner CSV-Backfill laufen koennen (Head auf dem Mittel ist eine
+    # Naeherung ggue. Mittel der Head-Outputs pro Patch, fuer Tags ok) --
+    # ohne erneuten Audio-Decode. Dient zugleich als Vollstaendigkeits-
+    # Marker fuer das Genre/Vibe-Schema (siehe _missing_parts).
+    "effnet_embedding",
     "error",
 ]
 
@@ -84,3 +101,41 @@ RELAXED_PER_ENERGY_STEP = 0.08
 
 # Wertebereich des DEAM-Modells (arousal/valence).
 AROUSAL_VALENCE_RANGE = (1.0, 9.0)
+
+# --- Genre-/Vibe-Tagging -----------------------------------------------------
+
+GENRE_MODEL_JSON = "genre_discogs400-discogs-effnet-1.json"
+VIBE_MODEL_JSON = "mtg_jamendo_moodtheme-discogs-effnet-1.json"
+
+# Discogs-Styles heissen "Electronic---Acid House"; angezeigt wird nur der
+# Teil nach dem Separator.
+GENRE_LABEL_SEPARATOR = "---"
+# Top-1 wird immer uebernommen (sonst waere 'genres' bei unsicheren Tracks
+# leer und die Zeile saehe unfertig aus); weitere Styles nur ab Schwelle.
+GENRE_MAX = 2
+GENRE_MIN_PROB = 0.10
+
+# Jamendo-Mood/Theme ist multi-label (Sigmoid, typisch kleine Aktivierungen).
+VIBE_MAX = 3
+VIBE_MIN_PROB = 0.10
+# DJ-relevante Teilmenge der 56 Jamendo-Tags -- der Rest (children, christmas,
+# corporate, trailer, ...) ist Produktionsmusik-Vokabular und waere nur Rauschen.
+VIBE_WHITELIST = {
+    "calm", "cool", "dark", "deep", "dream", "emotional", "energetic",
+    "epic", "fast", "fun", "groovy", "happy", "heavy", "meditative",
+    "melancholic", "melodic", "party", "powerful", "relaxing", "retro",
+    "romantic", "sad", "sexy", "slow", "soft", "space", "summer",
+    "upbeat", "uplifting",
+}
+
+# Trennzeichen fuer Mehrfachwerte in den CSV-Feldern 'genres'/'vibes'.
+TAG_SEPARATOR = "|"
+
+# Textfarben fuer Genre-Chips (Rich-Farbnamen, gerendert auf dunklem Pill);
+# die Zuordnung ist ein stabiler Hash auf den Style-Namen, damit derselbe
+# Style immer dieselbe Farbe traegt. Bewusst mittelhelle Toene: sichtbar,
+# aber leiser als das Track-Label darueber.
+GENRE_CHIP_COLORS = [
+    "orchid", "dark_orange", "cornflower_blue", "dark_sea_green4", "medium_purple",
+    "hot_pink3", "steel_blue1", "gold3", "dark_cyan", "grey66",
+]

@@ -7,8 +7,11 @@ Bedienlogik MainScreen (fzf-Stil: Suche haelt den Fokus, Aktionen auf Chords):
 - Ctrl+T pinnt ein Transition-Ziel B (Fuzzy-Suche + Enter): Die Liste zeigt
   dann Brueckenkandidaten mit Score zu beiden Seiten, sortiert nach der
   schwaecheren. Enter re-anchort A und behaelt B; Enter auf B selbst,
-  Esc oder erneutes Ctrl+T beenden den Modus. Bewusst stateless -- kein
-  gespeicherter Pfad, das Set lebt in der DJ-Software.
+  Esc oder erneutes Ctrl+T beenden den Modus. Bewusst stateless -- keine
+  Playlists/Sets, das Set lebt in der DJ-Software; gemerkt wird nur die
+  Library-Liste (libraries.json, siehe LibraryScreen).
+- Ctrl+L geht zurueck zum LibraryScreen (Libraries an/abwaehlen, anlegen,
+  analysieren); Enter dort uebernimmt die Auswahl in die laufende Session.
 - Bei LEEREM Suchfeld sind ←/→ (Energie) und ,/. (BPM) Aktions-Tasten;
   mit Text im Feld bewegen sie den Cursor bzw. tippen.
 - ↑/↓/Enter laufen immer auf der Ergebnisliste (Cursor + Auswahl).
@@ -16,9 +19,11 @@ Bedienlogik MainScreen (fzf-Stil: Suche haelt den Fokus, Aktionen auf Chords):
 """
 
 import asyncio
+import json
 import re
 import subprocess
 import sys
+import zlib
 from pathlib import Path
 
 from rich.markup import escape
@@ -29,16 +34,17 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
-from textual.suggester import Suggester
 from textual.widgets import DataTable, Input, ProgressBar, RichLog, Static
 
 from .config import (
     ENERGY_MAX,
     ENERGY_MIN,
+    GENRE_CHIP_COLORS,
     SCORE_COLOR_STEPS,
+    TAG_SEPARATOR,
     TOP_N,
 )
-from .library import Library, fuzzy_search, track_label
+from .library import Library, dir_status, fuzzy_search, track_label
 from .similarity import (
     harmonic_distance,
     pair_score,
@@ -50,11 +56,40 @@ from .similarity import (
 
 LOGO = "◤ SELECTA ◢"
 
+# Grosses Logo fuer den LibraryScreen -- bewusst eine Spur zu viel Liebe,
+# NFO-/Soundsystem-Style. Breite 57 Zeichen; Farbverlauf pro Zeile ueber
+# LOGO_GRADIENT.
+LOGO_BIG = """\
+███████╗███████╗██╗     ███████╗ ██████╗████████╗ █████╗
+██╔════╝██╔════╝██║     ██╔════╝██╔════╝╚══██╔══╝██╔══██╗
+███████╗█████╗  ██║     █████╗  ██║        ██║   ███████║
+╚════██║██╔══╝  ██║     ██╔══╝  ██║        ██║   ██╔══██║
+███████║███████╗███████╗███████╗╚██████╗   ██║   ██║  ██║
+╚══════╝╚══════╝╚══════╝╚══════╝ ╚═════╝   ╚═╝   ╚═╝  ╚═╝"""
+LOGO_GRADIENT = [
+    "bright_magenta", "magenta", "medium_orchid",
+    "medium_purple", "slate_blue1", "royal_blue1",
+]
+LOGO_TAGLINE = "░▒▓ pure signal · zero cloud · strictly sound system business ▓▒░"
+
+
+def render_logo() -> Text:
+    logo = Text(justify="center")
+    # auf einheitliche Breite padden: justify zentriert jede Zeile einzeln,
+    # ungleich lange Zeilen wuerden das Logo sonst um eine Spalte versetzen
+    lines = LOGO_BIG.splitlines()
+    width = max(len(line) for line in lines)
+    for line, style in zip(lines, LOGO_GRADIENT):
+        logo.append(line.ljust(width) + "\n", style=f"bold {style}")
+    logo.append(LOGO_TAGLINE, style="dim magenta")
+    return logo
+
+
 # Tasten, die nur bei leerem Suchfeld (bzw. auf der Tabelle) Aktionen ausloesen
 # -- keine Buchstaben, mit denen ein Titel beginnen koennte.
 ACTION_KEYS = {"left", "right", "comma", "full_stop"}
 # Chords, die IMMER Aktionen ausloesen (fzf-Konvention: Aktionen auf Ctrl).
-CTRL_ACTION_KEYS = {"ctrl+a", "ctrl+t"}
+CTRL_ACTION_KEYS = {"ctrl+a", "ctrl+t", "ctrl+l"}
 
 FILTER_COLUMNS = ("#", "TRACK", "BPM", "KEY")
 RESULT_COLUMNS = ("#", "TRACK", "BPM", "KEY", "SCORE", "ΔENERG", "ΔHÄRTE", "ΔMOOD")
@@ -67,6 +102,85 @@ TARGET_PLACEHOLDER = "Transition-Ziel suchen … (tippen zum Filtern)"
 # ---------------------------------------------------------------------------
 # Formatierung
 # ---------------------------------------------------------------------------
+
+def genre_chip_color(name: str) -> str:
+    """Stabiler Hash Style-Name -> Chip-Farbe (hash() ist pro Prozess
+    randomisiert und wuerde die Farben bei jedem Start wuerfeln)."""
+    return GENRE_CHIP_COLORS[zlib.crc32(name.encode("utf-8")) % len(GENRE_CHIP_COLORS)]
+
+
+def chip_line(track: dict) -> Text | None:
+    """Chip-Zeile unter dem Track-Label: Genres als farbige Pills, Vibes und
+    Jahr gedimmt dahinter. None, wenn es nichts zu zeigen gibt (alte CSV ohne
+    Genre-Analyse) -- die Zeile bleibt dann einzeilig."""
+    genres = [g for g in (track.get("genres") or "").split(TAG_SEPARATOR) if g]
+    extras = [v for v in (track.get("vibes") or "").split(TAG_SEPARATOR) if v]
+    year = (track.get("year") or "").strip()
+    if year:
+        extras.append(year)
+    if not genres and not extras:
+        return None
+    line = Text("  ")
+    for genre in genres:
+        # Farbiger Text auf dunklem Pill statt schwarz auf leuchtender
+        # Flaeche -- die Chips sollen unter dem Track-Label zuruecktreten,
+        # nicht heller strahlen als der Titel selbst.
+        line.append(f" {genre} ", style=f"{genre_chip_color(genre)} on grey19")
+        line.append(" ")
+    if extras:
+        line.append(" · ".join(extras), style="dim")
+    return line
+
+
+def fmt_track_cell(track: dict) -> tuple[Text, int]:
+    """TRACK-Zelle inkl. benoetigter Zeilenhoehe: Label, darunter die
+    Chip-Zeile (falls vorhanden -> Hoehe 2, sonst 1). Das Label ist fett --
+    Schriftgroessen gibt es im Terminal nicht, die Hierarchie Label ueber
+    Chips entsteht ueber Gewicht (bold) und Helligkeit (Chips gedimmt)."""
+    label = Text(track_label(track), style="bold")
+    chips = chip_line(track)
+    if chips is None:
+        return label, 1
+    label.append("\n")
+    label.append(chips)
+    return label, 2
+
+
+def fmt_analysis_log_line(info: dict) -> Text:
+    """Ergebniszeile im Analyse-Log (aus einem ::status-done-Event des
+    Subprozesses). Voll-Analyse -> Name plus dieselbe Chip-Zeile wie in der
+    Trackliste plus Kern-Scores; sonst eine kompakte Einzeiler-Variante."""
+    name = info.get("name", "?")
+    kind = info.get("kind")
+    if kind == "error":
+        return Text(f"✗ {name}: {info.get('error', '')}", style="red")
+    if kind == "complete":
+        return Text(f"≡ {name}", style="dim")
+    if kind == "tags":
+        return Text(
+            f"~ {name}  BPM {info.get('bpm') or '?'} nachgetragen  ({info.get('secs', '?')}s)",
+            style="yellow",
+        )
+    line = Text()
+    line.append("✓ ", style="bold green")
+    line.append(name, style="bold")
+    line.append(f"  ({info.get('secs', '?')}s)", style="dim")
+    line.append("\n")
+    chips = chip_line(info)  # info traegt genres/vibes/year wie ein Track-Dict
+    if chips is not None:
+        line.append(chips)
+        line.append("   ")
+    else:
+        line.append("   ")
+    line.append(
+        f"{info.get('bpm') or '?'} BPM · {info.get('key') or '?'}"
+        f" · arous {info.get('arousal') or '?'}"
+        f" · aggr {info.get('aggressive') or '?'}"
+        f" · dance {info.get('danceable') or '?'}",
+        style="dim",
+    )
+    return line
+
 
 def fmt_delta10(value) -> Text:
     """Mood-Delta als Δ×10-Ganzzahl: +0.4 -> '+4' (spart das redundante '0.')."""
@@ -229,7 +343,7 @@ class MainScreen(Screen):
         self.query_one("#logo", Static).update(Text(LOGO, style="bold magenta"))
         self.query_one("#keybar", Static).update(
             "[b]Enter[/b] wählen  [b]↑↓[/b] navigieren  [b]←→[/b] Energie  [b],[/b][b].[/b] BPM-Filter  "
-            "[b]^a[/b] Analyse  [b]^t[/b] Transition  [b]Esc[/b] leeren  [b]^c[/b] Ende"
+            "[b]^a[/b] Analyse  [b]^t[/b] Transition  [b]^l[/b] Libraries  [b]Esc[/b] leeren  [b]^c[/b] Ende"
         )
         self._update_header()
         self.refresh_status()
@@ -299,18 +413,23 @@ class MainScreen(Screen):
         else:
             mode = f"Energie {energy}"
 
+        dirs = self.library.music_dirs
+        if len(dirs) == 1:
+            location = str(dirs[0])
+        else:
+            location = f"{len(dirs)} Libraries: " + " + ".join(d.name or str(d) for d in dirs)
         self.query_one("#status", Static).update(
-            f"[dim]{self.library.music_dir}[/]   {badge}   {mode}   BPM {bpm}"
+            f"[dim]{escape(location)}[/]   {badge}   {mode}   BPM {bpm}"
         )
 
     # --- Listen-Befuellung ---
 
-    def _fill_table(self, columns, rows, tracks, border_title):
+    def _fill_table(self, columns, rows, tracks, border_title, heights=None):
         table = self.query_one(ResultsTable)
         table.clear(columns=True)
         table.add_columns(*columns)
-        for row in rows:
-            table.add_row(*row)
+        for i, row in enumerate(rows):
+            table.add_row(*row, height=heights[i] if heights else 1)
         self._row_tracks = tracks
         if tracks:
             table.move_cursor(row=0)
@@ -327,14 +446,16 @@ class MainScreen(Screen):
             order = sorted(range(len(lib.tracks)), key=lambda i: lib.labels[i].lower())
             tracks = [lib.tracks[i] for i in order]
 
-        rows = [
-            (str(i + 1), track_label(t), fmt_bpm_cell(t, None), fmt_key_cell(t, None))
-            for i, t in enumerate(tracks)
-        ]
+        rows = []
+        heights = []
+        for i, t in enumerate(tracks):
+            cell, height = fmt_track_cell(t)
+            heights.append(height)
+            rows.append((str(i + 1), cell, fmt_bpm_cell(t, None), fmt_key_cell(t, None)))
         title = f"{len(tracks)} Treffer" if needle.strip() else f"Library ({len(tracks)} Tracks)"
         if self._selecting_target:
             title = f"Transition-Ziel wählen — {title}"
-        self._fill_table(FILTER_COLUMNS, rows, tracks, title)
+        self._fill_table(FILTER_COLUMNS, rows, tracks, title, heights)
 
     def show_results(self) -> None:
         """Ergebnis-Modus: Ranking zur aktuellen Query (inkl. Energie/BPM-Shift);
@@ -350,12 +471,15 @@ class MainScreen(Screen):
         results = rank_similar(q, self.library, energy=self.energy, bpm_offset=self.bpm_offset, top=TOP_N)
         rows = []
         tracks = []
+        heights = []
         for i, r in enumerate(results):
             t = r["track"]
             tracks.append(t)
+            cell, height = fmt_track_cell(t)
+            heights.append(height)
             rows.append((
                 str(i + 1),
-                track_label(t),
+                cell,
                 fmt_bpm_cell(t, q),
                 fmt_key_cell(t, q),
                 Text(f"{r['score']:.3f}", style="bold"),
@@ -366,7 +490,7 @@ class MainScreen(Screen):
         title = query_title(q)
         if self.bpm_offset and not results:
             title += "  — 0 Treffer im BPM-Filter"
-        self._fill_table(RESULT_COLUMNS, rows, tracks, title)
+        self._fill_table(RESULT_COLUMNS, rows, tracks, title, heights)
 
     def _show_bridge_results(self) -> None:
         """Transition-Modus: Kandidaten zwischen Query (A) und Ziel (B),
@@ -375,12 +499,15 @@ class MainScreen(Screen):
         results = rank_bridge(q, target, self.library, bpm_offset=self.bpm_offset, top=TOP_N)
         rows = []
         tracks = []
+        heights = []
         for i, r in enumerate(results):
             t = r["track"]
             tracks.append(t)
+            cell, height = fmt_track_cell(t)
+            heights.append(height)
             rows.append((
                 str(i + 1),
-                track_label(t),
+                cell,
                 fmt_bpm_cell(t, q),
                 fmt_key_cell(t, q),
                 fmt_score_cell(r["score_a"]),
@@ -389,7 +516,7 @@ class MainScreen(Screen):
         title = f"Transition: {track_label(q)} ⇄ {track_label(target)}"
         if self.bpm_offset and not results:
             title += "  — 0 Treffer im BPM-Filter"
-        self._fill_table(BRIDGE_COLUMNS, rows, tracks, title)
+        self._fill_table(BRIDGE_COLUMNS, rows, tracks, title, heights)
 
     def _update_detail(self) -> None:
         detail = self.query_one("#detail", Static)
@@ -463,6 +590,8 @@ class MainScreen(Screen):
             self.action_analyze()
         elif key == "ctrl+t":
             self.action_transition()
+        elif key == "ctrl+l":
+            self.action_libraries()
         elif key in ("left", "right") and self._results_shown and self.transition_target is None:
             # Energie-Achse im Transition-Modus aus: ihr Ziel-Shifting
             # kollidiert mit dem Brueckenziel zwischen A und B.
@@ -531,7 +660,43 @@ class MainScreen(Screen):
             else:
                 self.show_filter(self.query_one(SearchInput).value)
 
-        self.app.push_screen(AnalyzeModal(status=self._status_cache), done)
+        self.app.push_screen(
+            AnalyzeModal(self.library.music_dirs, status=self._status_cache), done
+        )
+
+    def action_libraries(self) -> None:
+        """Ctrl+L: Library-Screen ueber die Session legen -- Libraries
+        umschalten, ohne die Session zu verlieren (Query/Energie bleiben,
+        sofern der Track noch in der neuen Auswahl liegt)."""
+        def done(paths: list[Path] | None) -> None:
+            if paths is None:
+                return  # Esc -- nichts geaendert
+            self.app.library = Library(paths)
+            self._after_library_change()
+
+        self.app.push_screen(LibraryScreen(return_paths=True), done)
+
+    def _after_library_change(self) -> None:
+        """Session-Zustand gegen die neue Library abgleichen: Query und
+        Transition-Ziel auf die neuen Track-Dicts umhaengen; ist die Query
+        nicht mehr dabei, zurueck in die Filteransicht."""
+        by_path = {t["filepath"]: t for t in self.library.tracks}
+        if self.query_track is not None:
+            self.query_track = by_path.get(self.query_track["filepath"])
+        if self.transition_target is not None:
+            self.transition_target = by_path.get(self.transition_target["filepath"])
+        if self.query_track is None:
+            self.transition_target = None
+            self._selecting_target = False
+            self.query_one(SearchInput).placeholder = SEARCH_PLACEHOLDER
+        self._status_cache = None
+        self.refresh_status()
+        if self.query_track is not None and self._results_shown:
+            self.show_results()
+        else:
+            self._results_shown = False
+            self.show_filter(self.query_one(SearchInput).value)
+        self._update_header()
 
     def action_transition(self) -> None:
         """Ctrl+T: Ziel-Auswahl starten bzw. den Transition-Modus verlassen."""
@@ -579,10 +744,13 @@ class AnalyzeModal(ModalScreen):
         Binding("enter", "start", "Start"),
     ]
 
-    def __init__(self, status: tuple[int, int] | None = None):
+    def __init__(self, music_dirs, status: tuple[int, int] | None = None):
         super().__init__()
-        self._status = status  # Cache vom MainScreen -- kein erneuter Ordner-Scan
+        self._music_dirs = [Path(d) for d in music_dirs]
+        self._status = status  # Cache vom Aufrufer -- kein erneuter Ordner-Scan
         self._state = "confirm"  # confirm -> running -> finished
+        self._cancelled = False
+        self._current_name = ""  # Track der Live-Statuszeile (::status track)
         self._proc: asyncio.subprocess.Process | None = None
 
     def compose(self) -> ComposeResult:
@@ -590,6 +758,7 @@ class AnalyzeModal(ModalScreen):
             yield Static("[b]Analyse[/b]", id="analyze-title")
             yield Static(id="analyze-info", markup=True)
             yield ProgressBar(id="analyze-progress", show_eta=False)
+            yield Static(id="analyze-current")
             yield RichLog(id="analyze-log", max_lines=500, wrap=True)
             yield Static(id="analyze-hint", markup=True)
 
@@ -599,10 +768,10 @@ class AnalyzeModal(ModalScreen):
             counts = f"{analyzed} von {total} Tracks analysiert, [b]{total - analyzed} offen[/b]."
         else:
             counts = "Analysiert neue Tracks und ergänzt fehlende Embeddings."
-        self.query_one("#analyze-info", Static).update(
-            f"[dim]{self.app.library.music_dir}[/]\n{counts}"
-        )
+        dirs = "\n".join(f"[dim]{escape(str(d))}[/]" for d in self._music_dirs)
+        self.query_one("#analyze-info", Static).update(f"{dirs}\n{counts}")
         self.query_one(ProgressBar).display = False
+        self.query_one("#analyze-current", Static).display = False
         self.query_one(RichLog).display = False
         self.query_one("#analyze-hint", Static).update(
             "[b]Enter[/b] startet die Analyse   [b]Esc[/b] zurück"
@@ -613,6 +782,7 @@ class AnalyzeModal(ModalScreen):
             return
         self._state = "running"
         self.query_one(ProgressBar).display = True
+        self.query_one("#analyze-current", Static).display = True
         self.query_one(RichLog).display = True
         self.query_one("#analyze-title", Static).update("[b]Analyse läuft[/b]")
         self.query_one("#analyze-hint", Static).update(
@@ -622,43 +792,82 @@ class AnalyzeModal(ModalScreen):
 
     @work(exclusive=True)
     async def _stream_analysis(self) -> None:
+        """Die Libraries laufen nacheinander als je ein Subprozess durch --
+        der Fortschrittsbalken gilt pro Library, das Log kuendigt jede an."""
         log = self.query_one(RichLog)
         bar = self.query_one(ProgressBar)
-        cmd = [
-            sys.executable, "-u", "-m", "selecta", "analyze",
-            "--music-dir", str(self.app.library.music_dir),
-            "--models-dir", str(self.app.models_dir),
-            "--porcelain",
-        ]
-        self._proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        assert self._proc.stdout is not None
-        while True:
-            line = await self._proc.stdout.readline()
-            if not line:
+        last_code = 0
+        for music_dir in self._music_dirs:
+            if self._cancelled:
                 break
-            text = line.decode("utf-8", "replace").rstrip()
-            if text.startswith("::progress "):
-                _, done, total = text.split()
-                bar.update(total=max(int(total), 1), progress=int(done))
-            elif text:
-                log.write(text)
+            if len(self._music_dirs) > 1:
+                log.write(f"── {music_dir} ──")
+            cmd = [
+                sys.executable, "-u", "-m", "selecta", "analyze",
+                "--music-dir", str(music_dir),
+                "--models-dir", str(self.app.models_dir),
+                "--porcelain",
+            ]
+            self._proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            assert self._proc.stdout is not None
+            while True:
+                line = await self._proc.stdout.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", "replace").rstrip()
+                if text.startswith("::progress "):
+                    _, done, total = text.split()
+                    bar.update(total=max(int(total), 1), progress=int(done))
+                elif text.startswith("::status "):
+                    try:
+                        event = json.loads(text[len("::status "):])
+                    except ValueError:
+                        continue
+                    self._handle_status(event, log)
+                elif text:
+                    log.write(text)
+            last_code = await self._proc.wait()
+            if last_code != 0:
+                break
 
-        code = await self._proc.wait()
+        self.query_one("#analyze-current", Static).update("")
         self._state = "finished"
-        if code == 0:
+        if last_code == 0 and not self._cancelled:
             self.query_one("#analyze-title", Static).update("[b green]Analyse beendet[/b green]")
         else:
             self.query_one("#analyze-title", Static).update(
-                f"[b yellow]Analyse abgebrochen/fehlgeschlagen (Code {code})[/b yellow]"
+                f"[b yellow]Analyse abgebrochen/fehlgeschlagen (Code {last_code})[/b yellow]"
             )
         self.query_one("#analyze-hint", Static).update("[dim]Esc schließt[/dim]")
 
+    def _handle_status(self, event: dict, log: RichLog) -> None:
+        """Live-Statuszeile (track/stage) und Ergebniszeilen (done) aus den
+        ::status-Events des Analyse-Subprozesses."""
+        current = self.query_one("#analyze-current", Static)
+        kind = event.get("event")
+        if kind == "track":
+            self._current_name = event.get("name", "?")
+            line = Text("▶ ", style="cyan")
+            line.append(self._current_name, style="bold")
+            line.append("  startet …", style="dim")
+            current.update(line)
+        elif kind == "stage":
+            line = Text("▶ ", style="cyan")
+            line.append(self._current_name, style="bold")
+            line.append(f"  [{event.get('step', '?')}/{event.get('steps', '?')}] ", style="dim")
+            line.append(event.get("label", ""), style="cyan")
+            current.update(line)
+        elif kind == "done":
+            current.update("")
+            log.write(fmt_analysis_log_line(event))
+
     def action_close_or_cancel(self) -> None:
         if self._state == "running":
+            self._cancelled = True
             if self._proc is not None and self._proc.returncode is None:
                 self._proc.terminate()
             self.query_one("#analyze-hint", Static).update("[yellow]Breche ab …[/yellow]")
@@ -670,9 +879,11 @@ class AnalyzeModal(ModalScreen):
 
 def resolve_music_dir(raw: str) -> Path:
     """Windows-Pfade (C:\\... oder C:/...) via wslpath nach /mnt/... uebersetzen,
-    z.B. beim Eintippen im DirScreen-Prompt. Alles andere (/mnt/..., ~, relative
-    Pfade) bleibt unveraendert -- WSL kennt kein C:\\, die App laeuft dort drin."""
-    raw = raw.strip()
+    z.B. beim Einfuegen im Library-hinzufuegen-Dialog. Alles andere (/mnt/...,
+    ~, relative Pfade) bleibt unveraendert -- WSL kennt kein C:\\, die App
+    laeuft dort drin. Umschliessende Anfuehrungszeichen werden entfernt:
+    Terminals pasten sie beim Drag & Drop eines Ordners mit."""
+    raw = raw.strip().strip("'\"")
     if re.match(r"^[A-Za-z]:[\\/]", raw):
         try:
             converted = subprocess.run(
@@ -685,94 +896,278 @@ def resolve_music_dir(raw: str) -> Path:
     return Path(raw).expanduser()
 
 
-class PathSuggester(Suggester):
-    """Ghost-Text-Vervollstaendigung fuer Ordnerpfade (naechster passender
-    Unterordner, alphabetisch erster Treffer -- Rechts/End uebernimmt ihn)."""
+# ---------------------------------------------------------------------------
+# Gemerkte Libraries (libraries.json)
+# ---------------------------------------------------------------------------
 
-    def __init__(self) -> None:
-        super().__init__(use_cache=False, case_sensitive=True)
-
-    async def get_suggestion(self, value: str) -> str | None:
-        value = value.strip()
-        if not value:
-            return None
-        path = resolve_music_dir(value)
-        parent, partial = (path, "") if value.endswith(("/", "\\")) else (path.parent, path.name)
-        try:
-            if not parent.is_dir():
-                return None
-            matches = sorted(
-                p.name
-                for p in parent.iterdir()
-                if p.is_dir() and not p.name.startswith(".") and p.name.startswith(partial)
-            )
-        except OSError:
-            return None
-        if not matches:
-            return None
-        return str(parent / matches[0])
+CONFIG_DIR = Path.home() / ".local" / "share" / "selecta"
+LIBRARIES_FILE = CONFIG_DIR / "libraries.json"
+# Vorgaenger-Format (ein einziger gemerkter Pfad) -- wird beim ersten Start
+# ohne libraries.json einmalig als erste Library uebernommen.
+LAST_DIR_FILE = CONFIG_DIR / "last_dir"
 
 
-class PathInput(Input):
-    """Input mit Tab-Vervollstaendigung wie in einer normalen Konsole --
-    Textual bindet die Ghost-Text-Uebernahme sonst nur an Rechts-Pfeil/Ende,
-    nicht an Tab (das navigiert normalerweise den Fokus weiter)."""
-
-    BINDINGS = [Binding("tab", "accept_suggestion", "Vervollstaendigen", show=False)]
-
-    def action_accept_suggestion(self) -> None:
-        if self.cursor_at_end and self._suggestion:
-            self.value = self._suggestion
-            self.cursor_position = len(self.value)
-        else:
-            self.screen.focus_next()
-
-
-LAST_DIR_FILE = Path.home() / ".local" / "share" / "selecta" / "last_dir"
-
-
-def load_last_dir() -> str:
+def load_libraries() -> list[dict]:
+    """Gemerkte Libraries: [{"path": str, "active": bool}, ...]."""
     try:
-        return LAST_DIR_FILE.read_text(encoding="utf-8").strip()
+        raw = json.loads(LIBRARIES_FILE.read_text(encoding="utf-8"))
+        return [
+            {"path": str(entry["path"]), "active": bool(entry.get("active", True))}
+            for entry in raw.get("libraries", [])
+            if entry.get("path")
+        ]
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        pass
+    try:
+        last = LAST_DIR_FILE.read_text(encoding="utf-8").strip()
     except OSError:
-        return ""
+        last = ""
+    return [{"path": last, "active": True}] if last else []
 
 
-def save_last_dir(music_dir: Path) -> None:
+def save_libraries(entries: list[dict]) -> None:
     try:
-        LAST_DIR_FILE.parent.mkdir(parents=True, exist_ok=True)
-        LAST_DIR_FILE.write_text(str(music_dir), encoding="utf-8")
+        LIBRARIES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        LIBRARIES_FILE.write_text(
+            json.dumps({"libraries": entries}, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
     except OSError:
         pass
 
 
 # ---------------------------------------------------------------------------
-# Ordner-Abfrage beim Start ohne Argument
+# LibraryScreen: Start-Launcher -- Libraries verwalten und Auswahl starten
 # ---------------------------------------------------------------------------
 
-class DirScreen(Screen):
+class AddLibraryModal(ModalScreen):
+    """Neue Library anlegen: ein bewusst dummes Pfad-Eingabefeld. Statt
+    eigener Tab-Vervollstaendigung (fragil, nie so gut wie die Shell)
+    uebernimmt das Terminal die Arbeit: einen Ordner aus dem Dateimanager
+    ins Fenster ziehen pastet den Pfad (ggf. mit Anfuehrungszeichen, die
+    resolve_music_dir entfernt)."""
+
+    BINDINGS = [Binding("escape", "cancel", show=False)]
+
     def compose(self) -> ComposeResult:
-        with Vertical(id="dir-box"):
-            yield Static(Text(LOGO, style="bold magenta"))
-            yield Static("Musik-Ordner eingeben (Windows- oder /mnt-Pfad, Tab/→ vervollstaendigt):")
-            yield PathInput(
-                value=load_last_dir(),
-                placeholder="/mnt/g/Media/Musik/…",
-                id="dir-input",
-                suggester=PathSuggester(),
+        with Vertical(id="add-box"):
+            yield Static("[b]Library hinzufügen[/b]")
+            yield Static(
+                "Ordner aus dem Dateimanager [b]ins Fenster ziehen[/b] oder Pfad "
+                "einfügen (Windows- oder /mnt-Pfad):",
+                markup=True,
             )
-            yield Static(id="dir-error", markup=True)
+            yield Input(placeholder="/mnt/g/Media/Musik/…", id="add-input")
+            yield Static(id="add-error", markup=True)
+            yield Static("[b]Enter[/b] übernehmen   [b]Esc[/b] abbrechen", markup=True)
 
     def on_mount(self) -> None:
         self.query_one(Input).focus()
 
     @on(Input.Submitted)
     def _on_submitted(self, event: Input.Submitted) -> None:
+        if not event.value.strip():
+            self.dismiss(None)
+            return
         path = resolve_music_dir(event.value)
         if path.is_dir():
-            self.app.open_library(path)
+            self.dismiss(path)
         else:
-            self.query_one("#dir-error", Static).update(f"[red]Ordner nicht gefunden: {path}[/]")
+            self.query_one("#add-error", Static).update(
+                f"[red]Ordner nicht gefunden: {escape(str(path))}[/]"
+            )
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class LibraryScreen(Screen):
+    """Launcher: gemerkte Libraries an-/abwaehlen, anlegen, entfernen,
+    analysieren -- Enter startet die Suche ueber alle aktiven. Bewusst EIN
+    Screen statt Menuebaum; die Pfadeingabe ist auf das Anlegen (seltener
+    Vorgang) verbannt.
+
+    Zwei Verwendungen: beim Start ohne Pfad-Argument als Basis-Screen
+    (Enter oeffnet den MainScreen), und aus dem MainScreen per Ctrl+L
+    gepusht (return_paths=True: dismiss() liefert die aktiven Pfade,
+    None = unveraendert geschlossen)."""
+
+    BINDINGS = [
+        Binding("space", "toggle", show=False),
+        Binding("a", "add", show=False),
+        Binding("d", "remove", show=False),
+        Binding("ctrl+a", "analyze", show=False),
+        # priority: sonst schluckt die fokussierte DataTable das Enter
+        # (RowSelected) -- Klick auf eine Zeile toggelt, Enter startet.
+        Binding("enter", "start", show=False, priority=True),
+        Binding("escape", "back", show=False),
+    ]
+
+    def __init__(self, return_paths: bool = False):
+        super().__init__()
+        self._return_paths = return_paths
+        self.entries = load_libraries()
+        self._statuses: dict[str, tuple[int, int] | str] = {}
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="library-box"):
+            yield Static(render_logo(), id="library-logo")
+            yield DataTable(id="library-table")
+            yield Static(id="library-hint", markup=True)
+
+    def on_mount(self) -> None:
+        table = self.query_one(DataTable)
+        table.cursor_type = "row"
+        table.add_columns(" ", "LIBRARY", "TRACKS", "PFAD")
+        self.query_one("#library-hint", Static).update(
+            "[b]Space[/b]/Klick an/aus  [b]A[/b] hinzufügen  [b]D[/b] entfernen  "
+            "[b]^a[/b] analysieren  [b]Enter[/b] auflegen  [b]^c[/b] Ende"
+        )
+        self._render_entries()
+        table.focus()
+        self._scan_statuses()
+
+    # --- Darstellung ---
+
+    def _render_entries(self) -> None:
+        table = self.query_one(DataTable)
+        cursor = table.cursor_row
+        table.clear()
+        for entry in self.entries:
+            path = entry["path"]
+            active = entry["active"]
+            checkbox = Text("[x]", style="bold green") if active else Text("[ ]", style="dim")
+            name = Text(Path(path).name or path, style="bold" if active else "dim")
+            table.add_row(checkbox, name, self._status_cell(path), Text(path, style="dim"))
+        if self.entries:
+            table.move_cursor(row=min(max(cursor, 0), len(self.entries) - 1))
+
+    def _status_cell(self, path: str) -> Text:
+        status = self._statuses.get(path)
+        if status is None:
+            return Text("…", style="dim")
+        if status == "missing":
+            return Text("Ordner fehlt", style="red")
+        analyzed, total = status
+        if total == 0:
+            return Text("keine Audiodateien", style="red")
+        if analyzed == total:
+            return Text(f"{analyzed}/{total}", style="green")
+        if analyzed == 0:
+            return Text(f"0/{total}", style="red")
+        return Text(f"{analyzed}/{total}", style="yellow")
+
+    def _scan_statuses(self) -> None:
+        """Ordner-Scans (os.walk, auf /mnt/g potenziell langsam) im Thread;
+        die Zellen fuellen sich nach und nach."""
+        self.run_worker(self._scan_worker, thread=True, exclusive=True, group="libstatus")
+
+    def _scan_worker(self) -> None:
+        for entry in list(self.entries):
+            path = entry["path"]
+            if path in self._statuses:
+                continue
+            status = dir_status(path) if Path(path).is_dir() else "missing"
+            self.app.call_from_thread(self._apply_status, path, status)
+
+    def _apply_status(self, path: str, status) -> None:
+        self._statuses[path] = status
+        self._render_entries()
+
+    def _cursor_entry(self) -> dict | None:
+        row = self.query_one(DataTable).cursor_row
+        if 0 <= row < len(self.entries):
+            return self.entries[row]
+        return None
+
+    # --- Aktionen ---
+
+    def _toggle_entry(self, entry: dict | None) -> None:
+        if entry is None:
+            return
+        entry["active"] = not entry["active"]
+        save_libraries(self.entries)
+        self._render_entries()
+
+    def action_toggle(self) -> None:
+        self._toggle_entry(self._cursor_entry())
+
+    @on(DataTable.RowSelected)
+    def _on_row_selected(self, event: DataTable.RowSelected) -> None:
+        # Nur per Maus erreichbar -- Enter faengt das priority-Binding ab.
+        if 0 <= event.cursor_row < len(self.entries):
+            self._toggle_entry(self.entries[event.cursor_row])
+
+    def action_add(self) -> None:
+        def done(path: Path | None) -> None:
+            if path is None:
+                return
+            if any(entry["path"] == str(path) for entry in self.entries):
+                self.app.notify("Library ist schon in der Liste.", severity="warning")
+                return
+            for entry in self.entries:
+                other = Path(entry["path"])
+                if path.is_relative_to(other) or other.is_relative_to(path):
+                    self.app.notify(
+                        f"Achtung: verschachtelt mit {other} — gemeinsame Tracks "
+                        "werden in der Suche dedupliziert.",
+                        severity="warning",
+                    )
+            self.entries.append({"path": str(path), "active": True})
+            save_libraries(self.entries)
+            self._render_entries()
+            self._scan_statuses()
+
+        self.app.push_screen(AddLibraryModal(), done)
+
+    def action_remove(self) -> None:
+        entry = self._cursor_entry()
+        if entry is None:
+            return
+        self.entries.remove(entry)
+        save_libraries(self.entries)
+        self._render_entries()
+        self.app.notify("Eintrag entfernt — die CSV im Ordner bleibt erhalten.")
+
+    def action_analyze(self) -> None:
+        entry = self._cursor_entry()
+        if entry is None:
+            return
+        if not Path(entry["path"]).is_dir():
+            self.app.notify("Ordner nicht gefunden — Laufwerk verbunden?", severity="error")
+            return
+
+        def done(_result) -> None:
+            self._statuses.pop(entry["path"], None)
+            self._render_entries()
+            self._scan_statuses()
+
+        status = self._statuses.get(entry["path"])
+        status = status if isinstance(status, tuple) else None
+        self.app.push_screen(AnalyzeModal([entry["path"]], status=status), done)
+
+    def action_start(self) -> None:
+        active = [entry["path"] for entry in self.entries if entry["active"]]
+        missing = [p for p in active if not Path(p).is_dir()]
+        if missing:
+            self.app.notify(
+                f"Ordner nicht gefunden: {missing[0]} — Laufwerk verbunden?",
+                severity="error",
+            )
+            return
+        if not active:
+            hint = "erst [A] eine Library anlegen." if not self.entries else "erst eine Library aktiv schalten (Space)."
+            self.app.notify(f"Keine aktive Library — {hint}", severity="warning")
+            return
+        paths = [Path(p) for p in active]
+        if self._return_paths:
+            self.dismiss(paths)
+        else:
+            self.app.open_library(paths)
+
+    def action_back(self) -> None:
+        if self._return_paths:
+            self.dismiss(None)
 
 
 # ---------------------------------------------------------------------------
@@ -807,7 +1202,7 @@ class SelectaApp(App):
         width: 1fr;
         content-align: right middle;
     }
-    #search, #dir-input {
+    #search, #add-input {
         border: tall $accent;
         margin: 0 1;
     }
@@ -844,14 +1239,42 @@ class SelectaApp(App):
     #analyze-progress {
         margin: 1 0;
     }
+    #analyze-current {
+        height: 1;
+        margin-bottom: 1;
+    }
     #analyze-log {
         height: 1fr;
         border: round $accent 30%;
     }
-    DirScreen {
+    LibraryScreen {
         align: center middle;
     }
-    #dir-box {
+    #library-box {
+        width: 80;
+        height: auto;
+        max-height: 100%;
+        padding: 1 2;
+    }
+    #library-logo {
+        width: 100%;
+        margin-bottom: 1;
+    }
+    #library-table {
+        height: auto;
+        max-height: 14;
+        border: round $accent 50%;
+    }
+    #library-hint {
+        margin-top: 1;
+        width: 100%;
+        content-align: center middle;
+        color: $text-muted;
+    }
+    AddLibraryModal {
+        align: center middle;
+    }
+    #add-box {
         width: 70;
         height: auto;
         border: thick $accent;
@@ -869,13 +1292,12 @@ class SelectaApp(App):
     def on_mount(self) -> None:
         self.theme = "textual-dark"
         if self._initial_dir:
-            self.open_library(Path(self._initial_dir))
+            # Ad-hoc-Modus (`selecta /pfad`): direkt in die Suche, ohne die
+            # gemerkte Library-Liste anzufassen.
+            self.open_library([Path(self._initial_dir)])
         else:
-            self.push_screen(DirScreen())
+            self.push_screen(LibraryScreen())
 
-    def open_library(self, music_dir: Path) -> None:
-        self.library = Library(music_dir)
-        save_last_dir(music_dir)
-        if isinstance(self.screen, DirScreen):
-            self.pop_screen()
+    def open_library(self, music_dirs: list[Path]) -> None:
+        self.library = Library(music_dirs)
         self.push_screen(MainScreen())

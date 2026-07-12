@@ -73,10 +73,23 @@ def find_audio_files(music_dir: Path):
     return sorted(files)
 
 
+def dir_status(music_dir) -> tuple[int, int]:
+    """(analysierte, gesamt) Audiodateien eines Ordners, nur aus Dateisystem
+    und CSV -- ohne Embeddings zu decodieren (billig genug fuer die
+    Statusspalte im Library-Screen, die alle Ordner scannt)."""
+    csv_data = load_csv_data(csv_path_for(music_dir))
+    files = find_audio_files(Path(music_dir))
+    analyzed = sum(
+        1 for f in files
+        if str(f) in csv_data and csv_data[str(f)].get("embedding")
+    )
+    return analyzed, len(files)
+
+
 def read_existing_tags(filepath: Path) -> dict:
     """Liest vorhandene Artist/Titel/BPM/Key-Tags (z.B. von Rekordbox gesetzt)
     in die CSV, damit die Suche spaeter keine Audiodateien oeffnen muss."""
-    info = {"artist": "", "title": filepath.stem, "bpm": "", "key": ""}
+    info = {"artist": "", "title": filepath.stem, "bpm": "", "key": "", "year": ""}
     if filepath.suffix.lower() != ".mp3":
         return info
     try:
@@ -90,6 +103,12 @@ def read_existing_tags(filepath: Path) -> dict:
             info["bpm"] = str(tags["TBPM"].text[0])
         if "TKEY" in tags:
             info["key"] = str(tags["TKEY"].text[0])
+        # TDRC (ID3v2.4) bzw. von mutagen dorthin gemappte v2.3-TYER;
+        # nur das Jahr, volle Timestamps ("1994-06-01") abschneiden.
+        if "TDRC" in tags and tags["TDRC"].text:
+            year = str(tags["TDRC"].text[0])[:4]
+            if year.isdigit():
+                info["year"] = year
     except Exception:
         pass
     return info
@@ -135,33 +154,40 @@ def fuzzy_search(needle: str, labels: list[str], limit: int = 50, cutoff: float 
 
 
 class Library:
-    """Analysierte Tracks eines Musik-Ordners, suchfertig im Speicher.
+    """Analysierte Tracks eines oder mehrerer Musik-Ordner, suchfertig im
+    Speicher. Jeder Ordner behaelt seine eigene library_analysis.csv; hier
+    werden sie nur zum Suchen zusammengefuehrt.
 
     tracks: Zeilen mit vorhandenem Embedding, jeweils um '_embedding'
     (float32-Vektor) ergaenzt. matrix: zeilennormalisierte (N x dim)-Matrix
     fuer vektorisierte Cosine-Similarity.
     """
 
-    def __init__(self, music_dir):
-        self.music_dir = Path(music_dir)
-        self.csv_path = csv_path_for(music_dir)
+    def __init__(self, music_dirs):
+        if isinstance(music_dirs, (str, Path)):
+            music_dirs = [music_dirs]
+        self.music_dirs = [Path(d) for d in music_dirs]
         self.tracks: list[dict] = []
         self.labels: list[str] = []
         self.matrix: np.ndarray | None = None
-        self._csv_rows = 0
         self.reload()
 
     def reload(self):
-        csv_data = load_csv_data(self.csv_path)
-        self._csv_rows = len(csv_data)
         self.tracks = []
-        for filepath, row in csv_data.items():
-            if not row.get("embedding"):
-                continue
-            track = dict(row)
-            track["filepath"] = filepath
-            track["_embedding"] = decode_embedding(row["embedding"])
-            self.tracks.append(track)
+        seen: set[str] = set()
+        for music_dir in self.music_dirs:
+            csv_data = load_csv_data(csv_path_for(music_dir))
+            for filepath, row in csv_data.items():
+                # Dedupe ueber den absoluten Pfad: verschachtelte Libraries
+                # (z.B. /Musik und /Musik/House) wuerden Tracks sonst doppelt
+                # in die Suche bringen.
+                if filepath in seen or not row.get("embedding"):
+                    continue
+                seen.add(filepath)
+                track = dict(row)
+                track["filepath"] = filepath
+                track["_embedding"] = decode_embedding(row["embedding"])
+                self.tracks.append(track)
         self.labels = [track_label(t) for t in self.tracks]
         if self.tracks:
             m = np.stack([t["_embedding"] for t in self.tracks]).astype(np.float32)
@@ -171,9 +197,12 @@ class Library:
             self.matrix = None
 
     def status(self) -> tuple[int, int]:
-        """(analysierte, gesamt) Audiodateien im Ordner. 'Analysiert' heisst:
-        Datei liegt im Ordner UND hat eine ok-Zeile mit Embedding."""
-        files = find_audio_files(self.music_dir)
+        """(analysierte, gesamt) Audiodateien ueber alle Ordner. 'Analysiert'
+        heisst: Datei liegt in einem Ordner UND hat eine ok-Zeile mit
+        Embedding."""
+        files: set[str] = set()
+        for music_dir in self.music_dirs:
+            files.update(str(f) for f in find_audio_files(music_dir))
         analyzed_paths = {t["filepath"] for t in self.tracks}
-        analyzed = sum(1 for f in files if str(f) in analyzed_paths)
+        analyzed = sum(1 for f in files if f in analyzed_paths)
         return analyzed, len(files)

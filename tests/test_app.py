@@ -2,12 +2,28 @@
 
 import pytest
 
-from selecta.app import MainScreen, ResultsTable, SearchInput, SelectaApp
+import selecta.app as app_module
+from selecta.app import (
+    AddLibraryModal,
+    LibraryScreen,
+    MainScreen,
+    ResultsTable,
+    SearchInput,
+    SelectaApp,
+    chip_line,
+    fmt_track_cell,
+    genre_chip_color,
+    load_libraries,
+    resolve_music_dir,
+    save_libraries,
+)
+from selecta.library import compact_csv
+from tests.conftest import make_row
 
 
 @pytest.fixture
 def app(synthetic_library):
-    a = SelectaApp(music_dir=synthetic_library.music_dir)
+    a = SelectaApp(music_dir=synthetic_library.music_dirs[0])
     return a
 
 
@@ -173,7 +189,225 @@ async def test_analyze_modal_bestaetigung_esc_startet_nichts(app):
         assert isinstance(app.screen, MainScreen)
 
 
+# --- Chip-Zeile (Genre/Vibe/Jahr) --------------------------------------------
+
+def test_chip_line_mit_tags():
+    track = {"genres": "Acid House|Deep House", "vibes": "dark|groovy", "year": "1994"}
+    line = chip_line(track)
+    text = line.plain
+    assert " Acid House " in text and " Deep House " in text
+    assert "dark · groovy · 1994" in text
+
+
+def test_chip_line_leer_bei_alter_csv():
+    # Zeile aus einer CSV vor dem Genre-Schema: keine zweite Zeile, Hoehe 1.
+    track = {"filepath": "x.mp3", "genres": "", "vibes": "", "year": ""}
+    assert chip_line(track) is None
+    _cell, height = fmt_track_cell(track)
+    assert height == 1
+
+
+def test_fmt_track_cell_hoehe_2_mit_chips():
+    track = {"filepath": "x.mp3", "artist": "A", "title": "T", "genres": "Techno", "vibes": "", "year": ""}
+    cell, height = fmt_track_cell(track)
+    assert height == 2
+    assert cell.plain.startswith("A - T\n")
+
+
+def test_genre_chip_color_stabil():
+    assert genre_chip_color("Acid House") == genre_chip_color("Acid House")
+
+
+def test_fmt_analysis_log_line_volle_analyse():
+    from selecta.app import fmt_analysis_log_line
+
+    info = {"event": "done", "kind": "full", "name": "house_a.mp3",
+            "genres": "Acid House|Deep House", "vibes": "dark|groovy", "year": "1994",
+            "bpm": "124", "key": "7m", "arousal": 6.0, "aggressive": 0.2,
+            "danceable": 0.99, "secs": 5.3, "error": ""}
+    text = fmt_analysis_log_line(info).plain
+    assert text.startswith("✓ house_a.mp3  (5.3s)\n")  # Zeile 1: Name + Dauer
+    assert " Acid House " in text and " Deep House " in text  # Zeile 2: Chips
+    assert "dark · groovy · 1994" in text
+    assert "124 BPM · 7m" in text and "arous 6.0" in text
+
+
+def test_fmt_analysis_log_line_kompakte_faelle():
+    from selecta.app import fmt_analysis_log_line
+
+    assert fmt_analysis_log_line(
+        {"kind": "complete", "name": "x.mp3"}).plain == "≡ x.mp3"
+    assert "BPM 128 nachgetragen" in fmt_analysis_log_line(
+        {"kind": "tags", "name": "x.mp3", "bpm": "128", "secs": 2.0}).plain
+    assert fmt_analysis_log_line(
+        {"kind": "error", "name": "x.mp3", "error": "kaputt"}).plain == "✗ x.mp3: kaputt"
+
+
+async def test_liste_zeigt_chips_und_bleibt_bedienbar(app):
+    """Tracks mit Chips bekommen 2-zeilige Rows; Auswahl per Enter
+    funktioniert unveraendert."""
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = app.screen
+        table = screen.query_one(ResultsTable)
+        assert table.row_count == 6
+        heights = {screen._row_tracks[i]["filepath"]: table.ordered_rows[i].height
+                   for i in range(table.row_count)}
+        assert heights["house_a.mp3"] == 2   # hat Genres/Vibes/Jahr
+        assert heights["techno.mp3"] == 1    # ohne Tags einzeilig
+        await pilot.press(*"groove a", "enter")
+        assert screen.query_track["title"] == "Groove A"
+
+
 async def test_ctrl_c_beendet(app):
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.press("ctrl+c")
         assert app.return_value is None and app._exit
+
+
+# --- Library-Liste (libraries.json) ------------------------------------------
+
+@pytest.fixture
+def libraries_file(tmp_path, monkeypatch):
+    """Isoliert die Persistenz vom echten ~/.local/share/selecta."""
+    lib_file = tmp_path / "libraries.json"
+    monkeypatch.setattr(app_module, "LIBRARIES_FILE", lib_file)
+    monkeypatch.setattr(app_module, "LAST_DIR_FILE", tmp_path / "last_dir")
+    return lib_file
+
+
+@pytest.fixture
+def two_music_dirs(tmp_path):
+    """Zwei Ordner mit eigener CSV: house (2 Tracks) und techno (1 Track)."""
+    dir_a = tmp_path / "house"
+    dir_a.mkdir()
+    compact_csv(dir_a / "library_analysis.csv", dict([
+        make_row("house_a.mp3", "HouseArtist", "Groove A", 124, "7m", [1.0, 0.1, 0.0]),
+        make_row("house_b.mp3", "HouseArtist", "Groove B", 126, "8m", [0.95, 0.15, 0.0]),
+    ]))
+    dir_b = tmp_path / "techno"
+    dir_b.mkdir()
+    compact_csv(dir_b / "library_analysis.csv", dict([
+        make_row("techno.mp3", "TechArtist", "Hammer", 140, "2m", [0.1, 1.0, 0.0]),
+    ]))
+    return dir_a, dir_b
+
+
+def test_libraries_roundtrip(libraries_file):
+    entries = [{"path": "/mnt/g/house", "active": True}, {"path": "/mnt/g/techno", "active": False}]
+    save_libraries(entries)
+    assert load_libraries() == entries
+
+
+def test_libraries_kaputtes_json_ergibt_leere_liste(libraries_file):
+    libraries_file.write_text("{kaputt", encoding="utf-8")
+    assert load_libraries() == []
+
+
+def test_libraries_migration_von_last_dir(libraries_file, tmp_path):
+    # Vorgaenger-Version hat nur einen Pfad in last_dir gemerkt -- der wird
+    # beim ersten Start ohne libraries.json zur ersten Library.
+    (tmp_path / "last_dir").write_text("/mnt/g/house", encoding="utf-8")
+    assert load_libraries() == [{"path": "/mnt/g/house", "active": True}]
+
+
+def test_resolve_music_dir_entfernt_dragdrop_anfuehrungszeichen(tmp_path):
+    # Terminals pasten beim Drag & Drop den Pfad in Anfuehrungszeichen
+    assert resolve_music_dir(f"'{tmp_path}'") == tmp_path
+    assert resolve_music_dir(f'"{tmp_path}"') == tmp_path
+
+
+# --- LibraryScreen ------------------------------------------------------------
+
+async def test_start_ohne_pfad_zeigt_library_screen_und_enter_startet(two_music_dirs, libraries_file):
+    dir_a, dir_b = two_music_dirs
+    save_libraries([{"path": str(dir_a), "active": True}, {"path": str(dir_b), "active": True}])
+    app = SelectaApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        assert isinstance(app.screen, LibraryScreen)
+        await pilot.press("enter")
+        assert isinstance(app.screen, MainScreen)
+        assert len(app.library.tracks) == 3  # beide Libraries zusammen
+
+
+async def test_library_screen_space_toggelt_und_persistiert(two_music_dirs, libraries_file):
+    dir_a, dir_b = two_music_dirs
+    save_libraries([{"path": str(dir_a), "active": True}, {"path": str(dir_b), "active": True}])
+    app = SelectaApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("down", "space")  # techno abwaehlen
+        assert load_libraries()[1]["active"] is False
+        await pilot.press("enter")
+        assert isinstance(app.screen, MainScreen)
+        assert len(app.library.tracks) == 2  # nur house
+
+
+async def test_library_screen_add_und_remove(two_music_dirs, libraries_file):
+    dir_a, dir_b = two_music_dirs
+    save_libraries([{"path": str(dir_a), "active": True}])
+    app = SelectaApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("a")
+        assert isinstance(app.screen, AddLibraryModal)
+        app.screen.query_one("#add-input").value = str(dir_b)
+        await pilot.press("enter")
+        assert isinstance(app.screen, LibraryScreen)
+        assert [e["path"] for e in load_libraries()] == [str(dir_a), str(dir_b)]
+        # D entfernt nur den Listeneintrag, nicht die CSV im Ordner
+        await pilot.press("down", "d")
+        assert [e["path"] for e in load_libraries()] == [str(dir_a)]
+        assert (dir_b / "library_analysis.csv").exists()
+
+
+async def test_library_screen_ohne_aktive_library_startet_nicht(two_music_dirs, libraries_file):
+    dir_a, _dir_b = two_music_dirs
+    save_libraries([{"path": str(dir_a), "active": False}])
+    app = SelectaApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("enter")
+        assert isinstance(app.screen, LibraryScreen)  # bleibt stehen + Notify
+
+
+async def test_ctrl_l_schaltet_libraries_in_laufender_session_um(two_music_dirs, libraries_file):
+    dir_a, dir_b = two_music_dirs
+    save_libraries([{"path": str(dir_a), "active": True}, {"path": str(dir_b), "active": False}])
+    app = SelectaApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("enter")  # Start nur mit house
+        assert len(app.library.tracks) == 2
+        await pilot.press("ctrl+l")
+        assert isinstance(app.screen, LibraryScreen)
+        await pilot.press("down", "space", "enter")  # techno dazu, uebernehmen
+        screen = app.screen
+        assert isinstance(screen, MainScreen)
+        assert len(app.library.tracks) == 3
+        assert screen.query_one(ResultsTable).row_count == 3
+
+
+async def test_ctrl_l_esc_laesst_alles_unveraendert(two_music_dirs, libraries_file):
+    dir_a, dir_b = two_music_dirs
+    save_libraries([{"path": str(dir_a), "active": True}, {"path": str(dir_b), "active": True}])
+    app = SelectaApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("enter")
+        library_before = app.library
+        await pilot.press(*"groove a", "enter")  # Query setzen
+        await pilot.press("ctrl+l", "escape")
+        screen = app.screen
+        assert isinstance(screen, MainScreen)
+        assert app.library is library_before
+        assert screen.query_track["title"] == "Groove A"
+
+
+async def test_ctrl_l_query_bleibt_wenn_track_noch_dabei(two_music_dirs, libraries_file):
+    dir_a, dir_b = two_music_dirs
+    save_libraries([{"path": str(dir_a), "active": True}, {"path": str(dir_b), "active": False}])
+    app = SelectaApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("enter")
+        await pilot.press(*"groove a", "enter")  # Query = house_a
+        await pilot.press("ctrl+l")
+        await pilot.press("down", "space", "enter")  # techno dazu
+        screen = app.screen
+        assert screen.query_track["filepath"] == "house_a.mp3"  # Session lebt weiter
+        assert screen._results_shown
+        assert screen.query_one(ResultsTable).row_count == 2  # alle ausser Query

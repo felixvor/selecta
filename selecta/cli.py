@@ -18,9 +18,17 @@ def _headless_analyze(argv):
     args = parser.parse_args(argv)
 
     progress = None
+    status = None
     if args.porcelain:
+        import json
+
         def progress(done, total):
             print(f"::progress {done} {total}", flush=True)
+
+        # Strukturierte Events (track/stage/done) fuer die Live-Statuszeile
+        # und die Chip-Ergebniszeilen im AnalyzeModal.
+        def status(event):
+            print("::status " + json.dumps(event, ensure_ascii=False), flush=True)
 
     def log(msg):
         print(msg, flush=True)
@@ -29,7 +37,9 @@ def _headless_analyze(argv):
 
     with filtered_stderr(["No network created"]):
         try:
-            done, errors = run_analysis(args.music_dir, args.models_dir, log=log, progress=progress)
+            done, errors = run_analysis(
+                args.music_dir, args.models_dir, log=log, progress=progress, status=status
+            )
         except RuntimeError as e:
             print(f"FEHLER: {e}", file=sys.stderr)
             sys.exit(1)
