@@ -166,6 +166,60 @@ async def test_transition_esc_schichten(app):
         assert screen._results_shown
 
 
+def test_fmt_transition_bar_inhalt():
+    """Inhalt der Bar: A immer sichtbar; ohne Ziel der Auswahl-Hinweis,
+    mit Ziel B plus Direkt-Score."""
+    from selecta.app import fmt_transition_bar
+
+    a = {"artist": "HouseArtist", "title": "Groove A", "filepath": "a.mp3"}
+    b = {"artist": "TechArtist", "title": "Hammer", "filepath": "b.mp3"}
+    selecting = fmt_transition_bar(a, None, None).plain
+    assert "Groove A" in selecting and "select target" in selecting
+    pinned = fmt_transition_bar(a, b, 0.723).plain
+    assert "Groove A" in pinned and "Hammer" in pinned and "0.723" in pinned
+
+
+async def test_transition_bar_sichtbarkeit_folgt_dem_modus(app):
+    """Die Bar macht sichtbar, von welchem Track (A) aus gesucht wird --
+    vorher verschwand diese Info, sobald Ctrl+T gedrueckt war."""
+    from textual.widgets import Static
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = app.screen
+        bar = screen.query_one("#transition-bar", Static)
+        assert not bar.display                     # ohne Transition: versteckt
+        await pilot.press(*"groove a", "enter")
+        assert not bar.display
+        await pilot.press("ctrl+t")                # Ziel-Auswahl laeuft: A sichtbar
+        assert bar.display
+        await pilot.press(*"hammer", "enter")      # B = techno gepinnt
+        assert bar.display
+        # Re-Anchor per Enter: A wechselt, Bar bleibt
+        await pilot.press("enter")
+        assert screen.query_track["filepath"] != "house_a.mp3"
+        assert bar.display
+        # Enter auf B beendet die Transition -> Bar verschwindet
+        await pilot.press(*"hammer", "enter")
+        assert screen.transition_target is None
+        assert not bar.display
+
+
+async def test_transition_liste_markiert_ziel_b(app):
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = app.screen
+        await pilot.press(*"groove a", "enter")
+        await pilot.press("ctrl+t")
+        await pilot.press(*"hammer", "enter")
+        table = screen.query_one(ResultsTable)
+        b_index = next(i for i, t in enumerate(screen._row_tracks)
+                       if t["filepath"] == "techno.mp3")
+        rank_cell = table.get_row_at(b_index)[0]
+        assert rank_cell.plain == "◆B"
+        # alle anderen Zeilen tragen normale Ranknummern
+        other = table.get_row_at(0 if b_index != 0 else 1)[0]
+        assert other.plain.isdigit()
+
+
 async def test_transition_energie_inaktiv(app):
     async with app.run_test(size=(120, 40)) as pilot:
         screen = app.screen
@@ -218,6 +272,25 @@ def test_genre_chip_color_stabil():
     assert genre_chip_color("Acid House") == genre_chip_color("Acid House")
 
 
+def test_fmt_key_cell_markiert_geschaetzten_key():
+    """Geschaetzte Keys (key_estimated) tragen ein ~-Praefix und sind
+    gedimmt -- am Pult muss sichtbar sein, welchem Wert man trauen kann."""
+    from selecta.app import display_key, fmt_key_cell
+
+    tagged = {"key": "9m", "key_estimated": ""}
+    estimated = {"key": "9m", "key_estimated": "1"}
+    assert display_key(tagged) == "9m"
+    assert display_key(estimated) == "~9m"
+    assert display_key({"key": ""}) == "?"
+    assert fmt_key_cell(tagged, None).plain == "9m"
+    assert fmt_key_cell(estimated, None).plain == "~9m"
+    # mit Query: harmonische Farbe bleibt, aber gedimmt
+    query = {"key": "9m"}
+    cell = fmt_key_cell(estimated, query)
+    assert cell.plain == "~9m"
+    assert "dim" in str(cell.style)
+
+
 def test_fmt_analysis_log_line_volle_analyse():
     from selecta.app import fmt_analysis_log_line
 
@@ -237,8 +310,11 @@ def test_fmt_analysis_log_line_kompakte_faelle():
 
     assert fmt_analysis_log_line(
         {"kind": "complete", "name": "x.mp3"}).plain == "≡ x.mp3"
-    assert "BPM 128 nachgetragen" in fmt_analysis_log_line(
-        {"kind": "tags", "name": "x.mp3", "bpm": "128", "secs": 2.0}).plain
+    assert "BPM 128 · key 7m backfilled" in fmt_analysis_log_line(
+        {"kind": "tags", "name": "x.mp3", "bpm": "128", "key": "7m", "secs": 2.0}).plain
+    assert "key ~9m" in fmt_analysis_log_line(
+        {"kind": "tags", "name": "x.mp3", "bpm": "128", "key": "9m",
+         "key_estimated": "1", "secs": 2.0}).plain
     assert fmt_analysis_log_line(
         {"kind": "error", "name": "x.mp3", "error": "kaputt"}).plain == "✗ x.mp3: kaputt"
 

@@ -29,6 +29,59 @@ def _to_float(value):
         return None
 
 
+# Notennamen -> Pitch-Class (0=C ... 11=B), inkl. enharmonischer Schreibweisen.
+# Essentias Key-Algorithmen liefern Namen wie "A", "Eb", "F#".
+NOTE_PC = {
+    "C": 0, "B#": 0, "C#": 1, "Db": 1, "D": 2, "D#": 3, "Eb": 3,
+    "E": 4, "Fb": 4, "F": 5, "E#": 5, "F#": 6, "Gb": 6, "G": 7,
+    "G#": 8, "Ab": 8, "A": 9, "A#": 10, "Bb": 10, "B": 11, "Cb": 11,
+}
+
+
+def note_to_camelot(tonic: str, scale: str) -> str:
+    """Notenname + Modus (Essentia-Ausgabe, z.B. 'A'/'minor') -> Camelot-Code
+    ('8A'). Anker: C-Dur = 8B, A-Moll = 8A; +1 auf dem Rad = Quinte hoch.
+    Leerer String, wenn der Notenname unbekannt ist."""
+    pc = NOTE_PC.get(tonic.strip())
+    if pc is None or scale not in ("major", "minor"):
+        return ""
+    if scale == "minor":
+        pc = (pc + 3) % 12  # Parallel-Dur bestimmt die Rad-Position
+    num = ((pc * 7) % 12 + 7) % 12 + 1
+    return f"{num}{'A' if scale == 'minor' else 'B'}"
+
+
+def note_to_openkey(tonic: str, scale: str) -> str:
+    """Wie note_to_camelot, aber Open-Key-Notation ('1m'/'1d'; Anker:
+    C-Dur = 1d, A-Moll = 1m -- das Rad ist gegenueber Camelot um 7
+    Positionen verschoben)."""
+    camelot = note_to_camelot(tonic, scale)
+    if not camelot:
+        return ""
+    num = (int(camelot[:-1]) - 8) % 12 + 1
+    return f"{num}{'m' if scale == 'minor' else 'd'}"
+
+
+def key_to_pitch_class(raw: str):
+    """Getaggten Key (Open Key oder Camelot, via parse_key) -> (pitch_class,
+    'major'|'minor') der Tonika. Noetig, um Keys aus verschiedenen Notationen
+    auf einer kanonischen Ebene zu vergleichen -- parse_key allein reicht
+    nicht, weil Open Key '8m' (Bb-Moll) und Camelot '8A' (A-Moll) dieselbe
+    Nummer tragen. None, wenn nicht parsbar."""
+    parsed = parse_key(raw)
+    if parsed is None:
+        return None
+    num, mode = parsed
+    letter = raw.strip()[-1].lower()
+    # Rad-Position -> Pitch-Class der Dur-Tonika; Camelot-Anker 8B=C,
+    # Open-Key-Anker 1d=C. Moll: relative Tonika 3 Halbtoene tiefer.
+    offset = 8 if letter in ("a", "b") else 1
+    pc_major = ((num - offset) * 7) % 12
+    if mode == "minor":
+        return ((pc_major + 9) % 12, "minor")
+    return (pc_major, "major")
+
+
 def parse_key(raw: str):
     """Parst Open-Key ('7m'/'12d', wie z.B. Rekordbox es schreibt) oder
     Camelot-Notation ('8A'/'8B'). Rueckgabe: (nummer 1-12, 'major'|'minor')
@@ -54,16 +107,29 @@ def parse_key(raw: str):
     return (num, mode)
 
 
+def _wheel_position(pc: int, mode: str) -> int:
+    """Position auf dem Quintenrad (0-11); Moll liegt auf der Position
+    seines Relativ-Durs (Camelot/Open Key: gleiche Nummer = Relativpaar)."""
+    if mode == "minor":
+        pc = (pc + 3) % 12
+    return (pc * 7) % 12
+
+
 def harmonic_distance(key1_raw, key2_raw):
     """Grobe Distanz auf dem Quintenzirkel: 0=identisch, 1=eng verwandt
-    (Paralleltonart oder Nachbarquinte), 2=noch harmonisch mixbar, hoeher =
+    (Relativtonart oder Nachbarquinte), 2=noch harmonisch mixbar, hoeher =
     deutlicherer Bruch. None, wenn eine Tonart nicht geparst werden konnte
-    (=> neutral, kein Bonus/Malus)."""
-    k1, k2 = parse_key(key1_raw), parse_key(key2_raw)
+    (=> neutral, kein Bonus/Malus).
+
+    Vergleicht kanonisch ueber Pitch-Classes statt ueber die rohen
+    Rad-Nummern -- Open Key und Camelot sind um 7 Positionen gegeneinander
+    verschoben, gemischte Notationen (z.B. Traktor-Tags neben geschaetzten
+    Keys in anderer Notation) waeren sonst systematisch falsch."""
+    k1, k2 = key_to_pitch_class(key1_raw), key_to_pitch_class(key2_raw)
     if k1 is None or k2 is None:
         return None
-    n1, m1 = k1
-    n2, m2 = k2
+    n1, m1 = _wheel_position(*k1), k1[1]
+    n2, m2 = _wheel_position(*k2), k2[1]
     if n1 == n2 and m1 == m2:
         return 0
     if n1 == n2 and m1 != m2:

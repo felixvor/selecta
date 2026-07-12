@@ -24,6 +24,8 @@ from .config import (
     GENRE_MAX,
     GENRE_MIN_PROB,
     GENRE_MODEL_JSON,
+    KEY_NOTATION,
+    KEY_PROFILE,
     MAX_DOWNLOAD_ATTEMPTS,
     MIN_METADATA_BYTES,
     MIN_MODEL_BYTES,
@@ -40,6 +42,7 @@ from .library import (
     encode_embedding,
     find_audio_files,
     load_csv_data,
+    missing_parts,
     read_existing_tags,
 )
 
@@ -118,7 +121,7 @@ def download_models(models_dir: Path, log=print):
     if not missing:
         return
 
-    log(f"{len(missing)} von {len(MODEL_FILES)} Modell-Dateien fehlen, lade herunter ...")
+    log(f"{len(missing)} of {len(MODEL_FILES)} model files missing, downloading ...")
     for filename in missing:
         dest = models_dir / filename
         url = MODEL_FILES[filename]
@@ -127,21 +130,21 @@ def download_models(models_dir: Path, log=print):
 
         last_error = None
         for attempt in range(1, MAX_DOWNLOAD_ATTEMPTS + 1):
-            log(f"[{attempt}/{MAX_DOWNLOAD_ATTEMPTS}] Lade {filename} ...")
+            log(f"[{attempt}/{MAX_DOWNLOAD_ATTEMPTS}] Downloading {filename} ...")
             try:
                 _download(url, dest)
-                log(f"{filename}: fertig ({dest.stat().st_size / 1e6:.1f} MB)")
+                log(f"{filename}: done ({dest.stat().st_size / 1e6:.1f} MB)")
                 last_error = None
                 break
             except Exception as e:
                 last_error = e
-                log(f"Versuch {attempt} fehlgeschlagen: {e}")
+                log(f"Attempt {attempt} failed: {e}")
                 time.sleep(2)
 
         if last_error is not None:
             raise RuntimeError(
-                f"Konnte {filename} nicht laden ({last_error}). "
-                f"essentia.upf.edu spaeter erneut versuchen."
+                f"Could not download {filename} ({last_error}). "
+                f"Try essentia.upf.edu again later."
             )
 
 
@@ -149,20 +152,38 @@ def compute_bpm(filepath: Path) -> str:
     """BPM selbst berechnen (RhythmExtractor2013 -- schneller Standard-
     algorithmus, kein TensorFlow-Modell noetig). Eigener 44.1kHz-Load, weil
     die Embedding-Modelle mit 16kHz arbeiten, RhythmExtractor2013 aber die
-    volle Samplerate braucht.
-
-    Kein Key-Pendant hier bewusst: Essentias KeyExtractor liegt gegen 41
-    Rekordbox-getaggte Referenztracks bei 85% exakt einen Halbton daneben --
-    quer durch alle Tonart-Profile (bgate/edma/edmm/temperley/krumhansl/
-    shaath). BPM stimmt dagegen im Schnitt auf 0.09 BPM genau. Ein falsch
-    geschaetzter Key sieht in der Liste wie ein echter aus und kann beim
-    harmonischen Mixen crashen -- lieber "?" als eine Zahl, der man nicht
-    ansieht, dass sie ratet."""
+    volle Samplerate braucht. Stimmt gegen Rekordbox-Referenzen im Schnitt
+    auf 0.09 BPM genau."""
     from essentia.standard import MonoLoader, RhythmExtractor2013
 
     audio = MonoLoader(filename=str(filepath))()
     bpm, _ticks, _confidence, _estimates, _intervals = RhythmExtractor2013(method="multifeature")(audio)
     return f"{bpm:.1f}"
+
+
+def compute_key(filepath: Path) -> str:
+    """Key schaetzen, wenn kein DJ-Software-Tag vorliegt (KeyExtractor,
+    kein TensorFlow-Modell). Liefert die Notation aus config.KEY_NOTATION
+    ('9m' bzw. '4A') oder '' bei unbrauchbarer Ausgabe.
+
+    Historie: Die fruehere Designentscheidung "Key nie selbst berechnen"
+    beruhte auf einem Messfehler -- der Vergleich hatte Open-Key- gegen
+    Camelot-Nummern gehalten (die Raeder sind um 7 Positionen = exakt einen
+    Halbton verschoben), wodurch korrekte Schaetzungen als Halbton-Fehler
+    erschienen. scripts/key_eval.py misst mit sauberer Konvertierung 0%
+    Halbton-Fehler und ~75-80% exakte Treffer fuer das edmm-Profil; bewusst
+    fest 440 Hz, weil Tuning-Schaetzung pro Track die Quote verschlechtert.
+    Der Wert ist trotzdem nur Platzhalter: ein Tag aus Rekordbox/Traktor
+    ueberschreibt ihn beim naechsten Lauf (siehe run_analysis) und loescht
+    das key_estimated-Flag."""
+    from essentia.standard import KeyExtractor, MonoLoader
+
+    from .similarity import note_to_camelot, note_to_openkey
+
+    audio = MonoLoader(filename=str(filepath))()
+    key, scale, _strength = KeyExtractor(profileType=KEY_PROFILE, sampleRate=44100)(audio)
+    convert = note_to_openkey if KEY_NOTATION == "openkey" else note_to_camelot
+    return convert(key, scale)
 
 
 def load_model_labels(models_dir: Path, json_filename: str) -> list[str]:
@@ -248,12 +269,12 @@ class EssentiaAnalyzer:
     # nicht moeglich (TensorFlow meldet innerhalb eines Forward-Pass nichts),
     # aber die Etappengrenzen sind ehrlich und ticken sichtbar durch.
     STAGES = [
-        "Audio dekodieren (16 kHz)",
-        "EffNet-Embedding (Basis für Mood/Genre)",
-        "Similarity-Embedding (discogs_track)",
-        "MusiCNN-Embedding (Basis für Arousal)",
-        "Mood-/Arousal-Heads auswerten",
-        "Genre- & Vibe-Tags ableiten",
+        "decoding audio (16 kHz)",
+        "EffNet embedding (base for mood/genre)",
+        "similarity embedding (discogs_track)",
+        "MusiCNN embedding (base for arousal)",
+        "evaluating mood/arousal heads",
+        "deriving genre & vibe tags",
     ]
 
     def analyze(self, filepath: Path, stage=None) -> dict:
@@ -307,37 +328,11 @@ class EssentiaAnalyzer:
         }
 
 
-def _missing_parts(row: dict | None) -> set:
-    """Was fehlt einer CSV-Zeile noch? 'embedding' = volle Analyse noetig
-    (teuer, TensorFlow-Modelle), 'tags' = BPM evtl. nachtragbar (billig,
-    kein Modell). Massgeblich ist allein, ob ein Embedding vorhanden ist --
-    'error' ist reine Debug-Info und fliesst nicht in diese Entscheidung ein.
-
-    Nur BPM triggert 'tags', nicht Key/Jahr: die werden nie selbst berechnet
-    (siehe compute_bpm-Docstring), eine Zeile ohne solche Tags waere sonst
-    fuer immer 'offen' und wuerde bei jedem Ctrl+A erneut angefasst, ohne je
-    fertig zu werden. Sobald BPM einmal gesetzt ist, ist die Zeile endgueltig
-    fertig -- Key/Jahr werden dabei nur "kostenlos" mitgenommen, falls der
-    Tag inzwischen da ist, aber nicht eigens dafuer nachverfolgt.
-
-    Das effnet_embedding ist der Vollstaendigkeits-Marker des Genre/Vibe-
-    Schemas: Zeilen aus aelteren CSVs (vor genres/vibes) haben zwar ein
-    Track-Embedding, aber kein effnet_embedding -- sie laufen einmal durch
-    die volle Analyse. 'genres' selbst taugt nicht als Marker, weil 'vibes'
-    legitim leer sein darf und ein leeres Pflichtfeld die Zeile fuer immer
-    offen halten wuerde."""
-    if row is None or not row.get("embedding") or not row.get("effnet_embedding"):
-        return {"embedding"}
-    if not row.get("bpm"):
-        return {"tags"}
-    return set()
-
-
 def _done_event(kind: str, filepath: Path, row: dict, secs: float) -> dict:
     """Strukturiertes Ergebnis eines Datei-Durchlaufs -- Grundlage fuer die
     Ergebniszeile im Log (TUI rendert Chips, headless eine Textzeile).
 
-    kind: "full" (Voll-Analyse), "tags" (nur BPM/Tags nachgetragen),
+    kind: "full" (Voll-Analyse), "tags" (nur BPM/Key/Tags nachgetragen),
     "complete" (war schon fertig), "error"."""
     return {
         "event": "done",
@@ -348,6 +343,7 @@ def _done_event(kind: str, filepath: Path, row: dict, secs: float) -> dict:
         "year": row.get("year", ""),
         "bpm": row.get("bpm", ""),
         "key": row.get("key", ""),
+        "key_estimated": row.get("key_estimated", ""),
         "arousal": row.get("arousal", ""),
         "aggressive": row.get("aggressive", ""),
         "danceable": row.get("danceable", ""),
@@ -362,9 +358,12 @@ def _human_line(info: dict) -> str:
     if info["kind"] == "error":
         return f"✗ {name}: {info['error']}"
     if info["kind"] == "complete":
-        return f"≡ {name}  (vollstaendig)"
+        return f"≡ {name}  (complete)"
     if info["kind"] == "tags":
-        return f"~ {name}  BPM {info['bpm'] or '?'} nachgetragen  ({info['secs']}s)"
+        key = info["key"] or "?"
+        if info.get("key_estimated"):
+            key = f"~{key}"
+        return f"~ {name}  BPM {info['bpm'] or '?'} · key {key} backfilled  ({info['secs']}s)"
     tags = " · ".join(part for part in (
         (info["genres"] or "").replace(TAG_SEPARATOR, " | "),
         " ".join(v for v in (info["vibes"] or "").split(TAG_SEPARATOR) if v),
@@ -385,7 +384,8 @@ def run_analysis(music_dir, models_dir, log=print, progress=None, cancelled=None
     tatsaechlich fehlt: fehlt das Similarity-Embedding, laeuft die volle
     (teure) Analyse; ansonsten reicht ein billiger Tag-Re-Check (BPM/Key aus
     der Datei, z.B. von Rekordbox/Traktor gesetzt) plus Rhythm-Extractor-
-    Fallback ohne TensorFlow-Modelle. Der Tag-Re-Check laeuft bei JEDER
+    und KeyExtractor-Fallback ohne TensorFlow-Modelle (geschaetzte Keys
+    tragen das key_estimated-Flag). Der Tag-Re-Check laeuft bei JEDER
     Datei, auch bereits vollstaendigen -- ein zwischenzeitlich in der Datei
     gesetzter oder geaenderter Tag gilt als hochwertiger als unsere eigene
     Schaetzung und ueberschreibt den CSV-Wert.
@@ -407,24 +407,24 @@ def run_analysis(music_dir, models_dir, log=print, progress=None, cancelled=None
     csv_path = csv_path_for(music_dir)
 
     if not music_dir.exists():
-        raise RuntimeError(f"Musikordner nicht gefunden: {music_dir}")
+        raise RuntimeError(f"Music folder not found: {music_dir}")
 
     all_files = find_audio_files(music_dir)
-    log(f"{len(all_files)} Audiodateien in {music_dir}")
+    log(f"{len(all_files)} audio files in {music_dir}")
 
     csv_data = load_csv_data(csv_path)
     compact_csv(csv_path, csv_data, prune_missing=True)
 
-    todo = [(f, _missing_parts(csv_data.get(str(f)))) for f in all_files]
+    todo = [(f, missing_parts(csv_data.get(str(f)))) for f in all_files]
     open_count = sum(1 for _, missing in todo if missing)
-    log(f"{len(all_files) - open_count} bereits vollstaendig, {open_count} offen.")
+    log(f"{len(all_files) - open_count} already complete, {open_count} open.")
     if progress:
         progress(0, len(all_files))
 
     analyzer = None
     if any("embedding" in missing for _, missing in todo):
         download_models(models_dir, log=log)
-        log("Lade Essentia-Modelle (einmalig pro Lauf) ...")
+        log("Loading Essentia models (once per run) ...")
         analyzer = EssentiaAnalyzer(models_dir)
 
     def emit_done(kind, filepath, row, secs):
@@ -449,7 +449,7 @@ def run_analysis(music_dir, models_dir, log=print, progress=None, cancelled=None
 
         for filepath, missing in todo:
             if cancelled and cancelled():
-                log("Abgebrochen -- bereits analysierte Tracks sind gespeichert.")
+                log("Cancelled -- tracks analyzed so far are saved.")
                 break
 
             t0 = time.time()
@@ -498,7 +498,10 @@ def run_analysis(music_dir, models_dir, log=print, progress=None, cancelled=None
                 row["bpm"] = fresh_tags["bpm"]
                 changed = True
             if fresh_tags.get("key") and fresh_tags["key"] != row.get("key"):
+                # Tag gewinnt auch ueber eine fruehere eigene Schaetzung --
+                # das Flag faellt, der Wert gilt ab jetzt als verlaesslich.
                 row["key"] = fresh_tags["key"]
+                row["key_estimated"] = ""
                 changed = True
             if fresh_tags.get("year") and fresh_tags["year"] != row.get("year"):
                 row["year"] = fresh_tags["year"]
@@ -509,7 +512,15 @@ def run_analysis(music_dir, models_dir, log=print, progress=None, cancelled=None
                     row["bpm"] = compute_bpm(filepath)
                     changed = True
                 except Exception as e:
-                    log(f"BPM nicht ermittelbar bei {filepath.name}: {e}")
+                    log(f"Could not determine BPM for {filepath.name}: {e}")
+
+            if not row.get("key"):
+                try:
+                    row["key"] = compute_key(filepath)
+                    row["key_estimated"] = "1" if row["key"] else ""
+                    changed = changed or bool(row["key"])
+                except Exception as e:
+                    log(f"Could not determine key for {filepath.name}: {e}")
 
             scanned += 1
             if changed:

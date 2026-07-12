@@ -110,6 +110,26 @@ def test_dir_status_zaehlt_ohne_embeddings_zu_decodieren(tmp_path):
     assert dir_status(music_dir) == (1, 2)
 
 
+def test_dir_status_nutzt_analyse_kriterium(tmp_path):
+    """Regression '0 offen': Zeilen, die der Analyse-Lauf noch anfassen wuerde
+    (fehlendes effnet_embedding bzw. fehlender BPM), duerfen nicht als fertig
+    zaehlen -- sonst zeigt das Analyse-Modal '0 offen' und analysiert dann doch."""
+    music_dir = tmp_path / "musik"
+    music_dir.mkdir()
+    for name in ("fertig.mp3", "alt_schema.mp3", "ohne_bpm.mp3"):
+        (music_dir / name).write_bytes(b"")
+    fp_ok, row_ok = make_row(str(music_dir / "fertig.mp3"), "X", "A", 124, "7m", [1, 0, 0])
+    fp_alt, row_alt = make_row(str(music_dir / "alt_schema.mp3"), "X", "B", 126, "8m", [0, 1, 0])
+    row_alt["effnet_embedding"] = ""  # CSV von vor dem Genre/Vibe-Schema
+    fp_nobpm, row_nobpm = make_row(str(music_dir / "ohne_bpm.mp3"), "X", "C", "", "7m", [0, 0, 1])
+    compact_csv(music_dir / "library_analysis.csv",
+                {fp_ok: row_ok, fp_alt: row_alt, fp_nobpm: row_nobpm})
+    assert dir_status(music_dir) == (1, 3)
+
+    # Library.status() nutzt dasselbe Kriterium
+    assert Library(music_dir).status() == (1, 3)
+
+
 def test_track_label_fallback_dateiname():
     assert track_label({"artist": "A", "title": "T", "filepath": "x.mp3"}) == "A - T"
     assert track_label({"artist": "", "title": "", "filepath": "/pfad/Cooler Song.mp3"}) == "Cooler Song"

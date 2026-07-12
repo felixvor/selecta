@@ -43,6 +43,12 @@ CSV_FIELDNAMES = [
     "title",
     "bpm",
     "key",
+    # "1", wenn der Key von uns geschaetzt wurde (compute_key) statt aus
+    # einem DJ-Software-Tag zu stammen; leer bei Tag oder unbekannt.
+    # Anzeige dann gedimmt mit ~-Praefix; ein spaeter auftauchender Tag
+    # ueberschreibt Wert UND loescht das Flag. Alte CSVs ohne die Spalte
+    # lesen sich als leer -- kein Migrationscode noetig.
+    "key_estimated",
     "year",
     "genres",
     "vibes",
@@ -62,7 +68,7 @@ CSV_FIELDNAMES = [
     # als reiner CSV-Backfill laufen koennen (Head auf dem Mittel ist eine
     # Naeherung ggue. Mittel der Head-Outputs pro Patch, fuer Tags ok) --
     # ohne erneuten Audio-Decode. Dient zugleich als Vollstaendigkeits-
-    # Marker fuer das Genre/Vibe-Schema (siehe _missing_parts).
+    # Marker fuer das Genre/Vibe-Schema (siehe missing_parts).
     "effnet_embedding",
     "error",
 ]
@@ -71,6 +77,21 @@ FLOAT_FIELDS = [
     "aggressive", "happy", "sad", "relaxed", "party", "danceable",
     "approachability", "engagement", "arousal", "valence",
 ]
+
+# --- Key-Schaetzung ----------------------------------------------------------
+
+# Profil fuer Essentias KeyExtractor, wenn kein DJ-Software-Tag vorliegt.
+# Gemessen mit scripts/key_eval.py (Testset 41 + HumanMusic-Stichprobe 80,
+# Referenz = Rekordbox/Traktor-Tags): edmm 75-80% exakt, 0% Halbton-Fehler.
+# Bewusst OHNE Tuning-Korrektur (TuningFrequencyExtractor verschlechterte
+# die Trefferquote) und fest 440 Hz -- der historische "85% ein Halbton
+# daneben"-Befund war ein Notationsvergleichs-Artefakt, kein Modellfehler.
+KEY_PROFILE = "edmm"
+# Notation der geschaetzten Keys: "openkey" ('9m') oder "camelot" ('4A').
+# Sollte zur Notation der eigenen DJ-Software-Tags passen -- fuers Ranking
+# ist es egal (harmonic_distance vergleicht kanonisch ueber Pitch-Classes),
+# aber die Liste liest sich einheitlicher.
+KEY_NOTATION = "openkey"
 
 # --- Ranking ---------------------------------------------------------------
 

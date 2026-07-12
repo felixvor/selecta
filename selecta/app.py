@@ -70,7 +70,7 @@ LOGO_GRADIENT = [
     "bright_magenta", "magenta", "medium_orchid",
     "medium_purple", "slate_blue1", "royal_blue1",
 ]
-LOGO_TAGLINE = "░▒▓ pure signal · zero cloud · strictly sound system business ▓▒░"
+LOGO_TAGLINE = "░▒▓ your local audio intelligence ▓▒░"
 
 
 def render_logo() -> Text:
@@ -92,11 +92,11 @@ ACTION_KEYS = {"left", "right", "comma", "full_stop"}
 CTRL_ACTION_KEYS = {"ctrl+a", "ctrl+t", "ctrl+l"}
 
 FILTER_COLUMNS = ("#", "TRACK", "BPM", "KEY")
-RESULT_COLUMNS = ("#", "TRACK", "BPM", "KEY", "SCORE", "ΔENERG", "ΔHÄRTE", "ΔMOOD")
+RESULT_COLUMNS = ("#", "TRACK", "BPM", "KEY", "SCORE", "ΔENERG", "ΔHARD", "ΔMOOD")
 BRIDGE_COLUMNS = ("#", "TRACK", "BPM", "KEY", "SCORE→A", "SCORE→B")
 
-SEARCH_PLACEHOLDER = "Track suchen … (tippen zum Filtern)"
-TARGET_PLACEHOLDER = "Transition-Ziel suchen … (tippen zum Filtern)"
+SEARCH_PLACEHOLDER = "Search tracks … (type to filter)"
+TARGET_PLACEHOLDER = "Search transition target … (type to filter)"
 
 
 # ---------------------------------------------------------------------------
@@ -157,8 +157,11 @@ def fmt_analysis_log_line(info: dict) -> Text:
     if kind == "complete":
         return Text(f"≡ {name}", style="dim")
     if kind == "tags":
+        key = info.get("key") or "?"
+        if info.get("key_estimated"):
+            key = f"~{key}"
         return Text(
-            f"~ {name}  BPM {info.get('bpm') or '?'} nachgetragen  ({info.get('secs', '?')}s)",
+            f"~ {name}  BPM {info.get('bpm') or '?'} · key {key} backfilled  ({info.get('secs', '?')}s)",
             style="yellow",
         )
     line = Text()
@@ -216,17 +219,33 @@ def fmt_bpm_cell(track: dict, query: dict | None) -> Text:
     return Text(f"{bpm:.0f} ({bpm - q_bpm:+.0f})", style=style)
 
 
+def display_key(track: dict) -> str:
+    """Key fuer die Anzeige: '?' wenn leer, ~-Praefix wenn von uns
+    geschaetzt statt aus einem DJ-Software-Tag (der Wert ist Platzhalter,
+    bis Rekordbox/Traktor ihn ueberschreibt)."""
+    key = (track.get("key") or "").strip()
+    if not key:
+        return "?"
+    return f"~{key}" if track.get("key_estimated") else key
+
+
 def fmt_key_cell(track: dict, query: dict | None) -> Text:
     key = (track.get("key") or "").strip()
     if not key:
         return Text("?", style="dim")
+    shown = display_key(track)
+    # Geschaetzte Keys gedimmt: die harmonische Farbe bleibt lesbar, aber
+    # der Wert drängt sich nicht als verlaesslich auf.
+    estimated = bool(track.get("key_estimated"))
     if query is None:
-        return Text(key)
+        return Text(shown, style="dim" if estimated else "")
     rel = harmonic_distance(query.get("key"), key)
     if rel is None:
-        return Text(key, style="dim")
+        return Text(shown, style="dim")
     style = "green" if rel <= 1 else ("yellow" if rel == 2 else "dim")
-    return Text(key, style=style)
+    if estimated:
+        style = f"dim {style}"
+    return Text(shown, style=style)
 
 
 def fmt_detail_line(track: dict) -> str:
@@ -244,8 +263,33 @@ def fmt_detail_line(track: dict) -> str:
 
 def query_title(track: dict) -> str:
     bpm = track.get("bpm") or "?"
-    key = track.get("key") or "?"
-    return f"Ähnlich zu: {track_label(track)}  [{bpm} BPM | {key}]"
+    return f"Similar to: {track_label(track)}  [{bpm} BPM | {display_key(track)}]"
+
+
+def fmt_transition_bar(query: dict, target: dict | None, direct: float | None) -> Text:
+    """Inhalt der Transition-Bar: die eine Zeile, die im Transition-Modus
+    immer sagt, wo man steht -- Query A links, Ziel B rechts, dazwischen der
+    Direkt-Score als 'verbleibende Luecke'. Waehrend der Ziel-Auswahl
+    (target=None) bleibt B offen, aber A bleibt sichtbar -- vorher verschwand
+    beim Ctrl+T-Druck die Information, von welchem Track aus man sucht."""
+    bar = Text(no_wrap=True, overflow="ellipsis")
+    bar.append(" A ", style="bold black on cyan")
+    bar.append(" ")
+    bar.append(track_label(query), style="bold")
+    if target is None:
+        bar.append("  ──▶  ", style="dim")
+        bar.append(" B ", style="bold black on orange1")
+        bar.append(" ")
+        bar.append("select target …", style="orange1")
+        return bar
+    bar.append("  ──", style="dim")
+    if direct is not None:
+        bar.append(f" {direct:.3f} ", style=f"bold {score_style(direct)}")
+    bar.append("──▶  ", style="dim")
+    bar.append(" B ", style="bold black on orange1")
+    bar.append(" ")
+    bar.append(track_label(target), style="bold")
+    return bar
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +376,7 @@ class MainScreen(Screen):
                 yield Static(id="logo")
                 yield Static(id="status", markup=True)
             yield SearchInput(placeholder=SEARCH_PLACEHOLDER, id="search")
+            yield Static(id="transition-bar")
             yield ResultsTable(id="results")
             yield Static(id="detail", markup=True)
             yield Static(id="keybar", markup=True)
@@ -342,8 +387,8 @@ class MainScreen(Screen):
         table.zebra_stripes = True
         self.query_one("#logo", Static).update(Text(LOGO, style="bold magenta"))
         self.query_one("#keybar", Static).update(
-            "[b]Enter[/b] wählen  [b]↑↓[/b] navigieren  [b]←→[/b] Energie  [b],[/b][b].[/b] BPM-Filter  "
-            "[b]^a[/b] Analyse  [b]^t[/b] Transition  [b]^l[/b] Libraries  [b]Esc[/b] leeren  [b]^c[/b] Ende"
+            "[b]Enter[/b] select  [b]↑↓[/b] navigate  [b]←→[/b] energy  [b],[/b][b].[/b] BPM filter  "
+            "[b]^a[/b] analyze  [b]^t[/b] transition  [b]^l[/b] libraries  [b]Esc[/b] clear  [b]^c[/b] quit"
         )
         self._update_header()
         self.refresh_status()
@@ -372,17 +417,17 @@ class MainScreen(Screen):
     def _update_header(self) -> None:
         """Reines Rendern aus dem Cache -- laeuft bei jedem Energie/BPM-Tastendruck."""
         if self._status_cache is None:
-            badge = "[dim]● prüfe Ordner …[/]"
+            badge = "[dim]● scanning folders …[/]"
         else:
             analyzed, total = self._status_cache
             if total == 0:
-                badge = "[red]● keine Audiodateien[/]"
+                badge = "[red]● no audio files[/]"
             elif analyzed == total:
-                badge = f"[green]● {analyzed}/{total} analysiert[/]"
+                badge = f"[green]● {analyzed}/{total} analyzed[/]"
             elif analyzed == 0:
-                badge = f"[red]● 0/{total} analysiert — \\[a] drücken[/]"
+                badge = f"[red]● 0/{total} analyzed — press ^a[/]"
             else:
-                badge = f"[yellow]● {analyzed}/{total} analysiert ({total - analyzed} fehlen)[/]"
+                badge = f"[yellow]● {analyzed}/{total} analyzed ({total - analyzed} open)[/]"
 
         if self.energy > 0:
             energy = f"[orange1]{'▶' * self.energy} ({self.energy:+d})[/]"
@@ -401,17 +446,15 @@ class MainScreen(Screen):
         else:
             bpm = "[dim]±0[/]"
 
-        # Im Transition-Modus ersetzt das gepinnte Ziel die Energie-Anzeige
-        # (Energie ist dort deaktiviert); der Direkt-Score A->B zeigt, wie
-        # gross die Luecke noch ist, die ueberbrueckt wird.
+        # Im Transition-Modus ersetzt ein knapper Marker die Energie-Anzeige
+        # (Energie ist dort deaktiviert); A, B und der Direkt-Score stehen in
+        # der Transition-Bar ueber der Liste -- hier nicht doppelt.
         if self.transition_target is not None and self.query_track is not None:
-            direct = pair_score(self.query_track, self.transition_target)
-            mode = (f"Transition → {escape(track_label(self.transition_target))} "
-                    f"[{score_style(direct)}]{direct:.3f}[/]")
+            mode = "[orange1]Transition[/]"
         elif self._selecting_target:
-            mode = "[orange1]Transition-Ziel wählen …[/]"
+            mode = "[orange1]Selecting transition target …[/]"
         else:
-            mode = f"Energie {energy}"
+            mode = f"Energy {energy}"
 
         dirs = self.library.music_dirs
         if len(dirs) == 1:
@@ -421,6 +464,21 @@ class MainScreen(Screen):
         self.query_one("#status", Static).update(
             f"[dim]{escape(location)}[/]   {badge}   {mode}   BPM {bpm}"
         )
+        self._update_transition_bar()
+
+    def _update_transition_bar(self) -> None:
+        """Bar nur zeigen, wenn der Transition-Modus etwas zu sagen hat --
+        sonst kostet sie eine Zeile Listenplatz."""
+        bar = self.query_one("#transition-bar", Static)
+        if self.query_track is not None and self.transition_target is not None:
+            direct = pair_score(self.query_track, self.transition_target)
+            bar.update(fmt_transition_bar(self.query_track, self.transition_target, direct))
+            bar.display = True
+        elif self.query_track is not None and self._selecting_target:
+            bar.update(fmt_transition_bar(self.query_track, None, None))
+            bar.display = True
+        else:
+            bar.display = False
 
     # --- Listen-Befuellung ---
 
@@ -452,9 +510,9 @@ class MainScreen(Screen):
             cell, height = fmt_track_cell(t)
             heights.append(height)
             rows.append((str(i + 1), cell, fmt_bpm_cell(t, None), fmt_key_cell(t, None)))
-        title = f"{len(tracks)} Treffer" if needle.strip() else f"Library ({len(tracks)} Tracks)"
+        title = f"{len(tracks)} matches" if needle.strip() else f"Library ({len(tracks)} tracks)"
         if self._selecting_target:
-            title = f"Transition-Ziel wählen — {title}"
+            title = f"Select transition target — {title}"
         self._fill_table(FILTER_COLUMNS, rows, tracks, title, heights)
 
     def show_results(self) -> None:
@@ -489,7 +547,7 @@ class MainScreen(Screen):
             ))
         title = query_title(q)
         if self.bpm_offset and not results:
-            title += "  — 0 Treffer im BPM-Filter"
+            title += "  — 0 matches within BPM filter"
         self._fill_table(RESULT_COLUMNS, rows, tracks, title, heights)
 
     def _show_bridge_results(self) -> None:
@@ -505,17 +563,24 @@ class MainScreen(Screen):
             tracks.append(t)
             cell, height = fmt_track_cell(t)
             heights.append(height)
+            # Das Ziel B laeuft selbst als Kandidat mit -- in der Liste
+            # bekommt es statt der Ranknummer einen Marker, passend zum
+            # B-Badge in der Transition-Bar.
+            if t["filepath"] == target["filepath"]:
+                rank_cell = Text("◆B", style="bold orange1")
+            else:
+                rank_cell = Text(str(i + 1))
             rows.append((
-                str(i + 1),
+                rank_cell,
                 cell,
                 fmt_bpm_cell(t, q),
                 fmt_key_cell(t, q),
                 fmt_score_cell(r["score_a"]),
                 fmt_score_cell(r["score_b"]),
             ))
-        title = f"Transition: {track_label(q)} ⇄ {track_label(target)}"
+        title = f"Bridge candidates ({len(results)})"
         if self.bpm_offset and not results:
-            title += "  — 0 Treffer im BPM-Filter"
+            title = "Bridge candidates — 0 matches within BPM filter"
         self._fill_table(BRIDGE_COLUMNS, rows, tracks, title, heights)
 
     def _update_detail(self) -> None:
@@ -524,7 +589,7 @@ class MainScreen(Screen):
         if self._row_tracks and 0 <= table.cursor_row < len(self._row_tracks):
             detail.update(fmt_detail_line(self._row_tracks[table.cursor_row]))
         else:
-            detail.update("[dim]keine Auswahl[/]")
+            detail.update("[dim]no selection[/]")
 
     # --- Auswahl ---
 
@@ -707,7 +772,7 @@ class MainScreen(Screen):
             self.show_results()
             self._update_header()
         elif self.query_track is None:
-            self.app.notify("Transition braucht eine Query — erst Track mit Enter wählen.",
+            self.app.notify("Transition needs a query — select a track with Enter first.",
                             severity="warning")
         else:
             self._selecting_target = True
@@ -740,7 +805,7 @@ class MainScreen(Screen):
 
 class AnalyzeModal(ModalScreen):
     BINDINGS = [
-        Binding("escape", "close_or_cancel", "Abbrechen/Schließen"),
+        Binding("escape", "close_or_cancel", "Cancel/Close"),
         Binding("enter", "start", "Start"),
     ]
 
@@ -755,7 +820,7 @@ class AnalyzeModal(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="analyze-box"):
-            yield Static("[b]Analyse[/b]", id="analyze-title")
+            yield Static("[b]Analysis[/b]", id="analyze-title")
             yield Static(id="analyze-info", markup=True)
             yield ProgressBar(id="analyze-progress", show_eta=False)
             yield Static(id="analyze-current")
@@ -765,16 +830,16 @@ class AnalyzeModal(ModalScreen):
     def on_mount(self) -> None:
         if self._status is not None:
             analyzed, total = self._status
-            counts = f"{analyzed} von {total} Tracks analysiert, [b]{total - analyzed} offen[/b]."
+            counts = f"{analyzed} of {total} tracks analyzed, [b]{total - analyzed} open[/b]."
         else:
-            counts = "Analysiert neue Tracks und ergänzt fehlende Embeddings."
+            counts = "Analyzes new tracks and fills in missing embeddings."
         dirs = "\n".join(f"[dim]{escape(str(d))}[/]" for d in self._music_dirs)
         self.query_one("#analyze-info", Static).update(f"{dirs}\n{counts}")
         self.query_one(ProgressBar).display = False
         self.query_one("#analyze-current", Static).display = False
         self.query_one(RichLog).display = False
         self.query_one("#analyze-hint", Static).update(
-            "[b]Enter[/b] startet die Analyse   [b]Esc[/b] zurück"
+            "[b]Enter[/b] starts the analysis   [b]Esc[/b] back"
         )
 
     def action_start(self) -> None:
@@ -784,9 +849,9 @@ class AnalyzeModal(ModalScreen):
         self.query_one(ProgressBar).display = True
         self.query_one("#analyze-current", Static).display = True
         self.query_one(RichLog).display = True
-        self.query_one("#analyze-title", Static).update("[b]Analyse läuft[/b]")
+        self.query_one("#analyze-title", Static).update("[b]Analysis running[/b]")
         self.query_one("#analyze-hint", Static).update(
-            "[dim]Esc bricht ab — fertige Tracks bleiben gespeichert (Resume)[/dim]"
+            "[dim]Esc cancels — finished tracks stay saved (resume)[/dim]"
         )
         self._stream_analysis()
 
@@ -837,12 +902,12 @@ class AnalyzeModal(ModalScreen):
         self.query_one("#analyze-current", Static).update("")
         self._state = "finished"
         if last_code == 0 and not self._cancelled:
-            self.query_one("#analyze-title", Static).update("[b green]Analyse beendet[/b green]")
+            self.query_one("#analyze-title", Static).update("[b green]Analysis finished[/b green]")
         else:
             self.query_one("#analyze-title", Static).update(
-                f"[b yellow]Analyse abgebrochen/fehlgeschlagen (Code {last_code})[/b yellow]"
+                f"[b yellow]Analysis cancelled/failed (code {last_code})[/b yellow]"
             )
-        self.query_one("#analyze-hint", Static).update("[dim]Esc schließt[/dim]")
+        self.query_one("#analyze-hint", Static).update("[dim]Esc closes[/dim]")
 
     def _handle_status(self, event: dict, log: RichLog) -> None:
         """Live-Statuszeile (track/stage) und Ergebniszeilen (done) aus den
@@ -853,7 +918,7 @@ class AnalyzeModal(ModalScreen):
             self._current_name = event.get("name", "?")
             line = Text("▶ ", style="cyan")
             line.append(self._current_name, style="bold")
-            line.append("  startet …", style="dim")
+            line.append("  starting …", style="dim")
             current.update(line)
         elif kind == "stage":
             line = Text("▶ ", style="cyan")
@@ -870,7 +935,7 @@ class AnalyzeModal(ModalScreen):
             self._cancelled = True
             if self._proc is not None and self._proc.returncode is None:
                 self._proc.terminate()
-            self.query_one("#analyze-hint", Static).update("[yellow]Breche ab …[/yellow]")
+            self.query_one("#analyze-hint", Static).update("[yellow]Cancelling …[/yellow]")
         elif self._state == "finished":
             self.dismiss(True)
         else:
@@ -951,15 +1016,15 @@ class AddLibraryModal(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="add-box"):
-            yield Static("[b]Library hinzufügen[/b]")
+            yield Static("[b]Add library[/b]")
             yield Static(
-                "Ordner aus dem Dateimanager [b]ins Fenster ziehen[/b] oder Pfad "
-                "einfügen (Windows- oder /mnt-Pfad):",
+                "[b]Drag & drop[/b] a folder from your file manager into this "
+                "window, or paste a path (Windows or /mnt path):",
                 markup=True,
             )
             yield Input(placeholder="/mnt/g/Media/Musik/…", id="add-input")
             yield Static(id="add-error", markup=True)
-            yield Static("[b]Enter[/b] übernehmen   [b]Esc[/b] abbrechen", markup=True)
+            yield Static("[b]Enter[/b] confirm   [b]Esc[/b] cancel", markup=True)
 
     def on_mount(self) -> None:
         self.query_one(Input).focus()
@@ -974,7 +1039,7 @@ class AddLibraryModal(ModalScreen):
             self.dismiss(path)
         else:
             self.query_one("#add-error", Static).update(
-                f"[red]Ordner nicht gefunden: {escape(str(path))}[/]"
+                f"[red]Folder not found: {escape(str(path))}[/]"
             )
 
     def action_cancel(self) -> None:
@@ -1018,10 +1083,10 @@ class LibraryScreen(Screen):
     def on_mount(self) -> None:
         table = self.query_one(DataTable)
         table.cursor_type = "row"
-        table.add_columns(" ", "LIBRARY", "TRACKS", "PFAD")
+        table.add_columns(" ", "LIBRARY", "TRACKS", "PATH")
         self.query_one("#library-hint", Static).update(
-            "[b]Space[/b]/Klick an/aus  [b]A[/b] hinzufügen  [b]D[/b] entfernen  "
-            "[b]^a[/b] analysieren  [b]Enter[/b] auflegen  [b]^c[/b] Ende"
+            "[b]Space[/b]/click toggle  [b]A[/b] add  [b]D[/b] remove  "
+            "[b]^a[/b] analyze  [b]Enter[/b] play  [b]^c[/b] quit"
         )
         self._render_entries()
         table.focus()
@@ -1047,10 +1112,10 @@ class LibraryScreen(Screen):
         if status is None:
             return Text("…", style="dim")
         if status == "missing":
-            return Text("Ordner fehlt", style="red")
+            return Text("folder missing", style="red")
         analyzed, total = status
         if total == 0:
-            return Text("keine Audiodateien", style="red")
+            return Text("no audio files", style="red")
         if analyzed == total:
             return Text(f"{analyzed}/{total}", style="green")
         if analyzed == 0:
@@ -1103,14 +1168,14 @@ class LibraryScreen(Screen):
             if path is None:
                 return
             if any(entry["path"] == str(path) for entry in self.entries):
-                self.app.notify("Library ist schon in der Liste.", severity="warning")
+                self.app.notify("Library is already in the list.", severity="warning")
                 return
             for entry in self.entries:
                 other = Path(entry["path"])
                 if path.is_relative_to(other) or other.is_relative_to(path):
                     self.app.notify(
-                        f"Achtung: verschachtelt mit {other} — gemeinsame Tracks "
-                        "werden in der Suche dedupliziert.",
+                        f"Note: nested with {other} — shared tracks are "
+                        "deduplicated in the search.",
                         severity="warning",
                     )
             self.entries.append({"path": str(path), "active": True})
@@ -1127,14 +1192,14 @@ class LibraryScreen(Screen):
         self.entries.remove(entry)
         save_libraries(self.entries)
         self._render_entries()
-        self.app.notify("Eintrag entfernt — die CSV im Ordner bleibt erhalten.")
+        self.app.notify("Entry removed — the CSV inside the folder is kept.")
 
     def action_analyze(self) -> None:
         entry = self._cursor_entry()
         if entry is None:
             return
         if not Path(entry["path"]).is_dir():
-            self.app.notify("Ordner nicht gefunden — Laufwerk verbunden?", severity="error")
+            self.app.notify("Folder not found — drive connected?", severity="error")
             return
 
         def done(_result) -> None:
@@ -1151,13 +1216,13 @@ class LibraryScreen(Screen):
         missing = [p for p in active if not Path(p).is_dir()]
         if missing:
             self.app.notify(
-                f"Ordner nicht gefunden: {missing[0]} — Laufwerk verbunden?",
+                f"Folder not found: {missing[0]} — drive connected?",
                 severity="error",
             )
             return
         if not active:
-            hint = "erst [A] eine Library anlegen." if not self.entries else "erst eine Library aktiv schalten (Space)."
-            self.app.notify(f"Keine aktive Library — {hint}", severity="warning")
+            hint = "press A to add one first." if not self.entries else "activate one first (Space)."
+            self.app.notify(f"No active library — {hint}", severity="warning")
             return
         paths = [Path(p) for p in active]
         if self._return_paths:
@@ -1180,8 +1245,8 @@ class SelectaApp(App):
     # Taste (kein SIGINT), und Ctrl+Q wird z.B. vom VSCode-Terminal geschluckt.
     # Beenden verliert nichts -- die CSV ist immer persistiert.
     BINDINGS = [
-        Binding("ctrl+q", "quit", "Ende", priority=True),
-        Binding("ctrl+c", "quit", "Ende", priority=True),
+        Binding("ctrl+q", "quit", "Quit", priority=True),
+        Binding("ctrl+c", "quit", "Quit", priority=True),
     ]
 
     CSS = """
@@ -1205,6 +1270,13 @@ class SelectaApp(App):
     #search, #add-input {
         border: tall $accent;
         margin: 0 1;
+    }
+    #transition-bar {
+        height: 1;
+        margin: 0 1;
+        padding: 0 1;
+        background: $panel;
+        display: none;
     }
     ResultsTable {
         height: 1fr;

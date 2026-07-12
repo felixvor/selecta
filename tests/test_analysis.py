@@ -1,4 +1,5 @@
-from selecta.analysis import _missing_parts, pick_genres, pick_vibes
+from selecta.analysis import pick_genres, pick_vibes
+from selecta.library import missing_parts as _missing_parts
 
 
 def test_missing_row_needs_embedding():
@@ -24,14 +25,22 @@ def test_old_schema_row_without_effnet_needs_full_analysis():
 
 
 def test_ok_row_missing_bpm_needs_tags():
-    row = {"error": "", "embedding": "xyz", "effnet_embedding": "abc", "bpm": "", "key": ""}
+    row = {"error": "", "embedding": "xyz", "effnet_embedding": "abc", "bpm": "", "key": "7m"}
     assert _missing_parts(row) == {"tags"}
 
 
-def test_ok_row_with_bpm_but_no_key_is_done():
-    # Key wird nie selbst berechnet -- sonst waere die Zeile fuer immer
-    # "offen" und wuerde bei jedem Analyse-Lauf erneut angefasst.
+def test_ok_row_with_bpm_but_no_key_needs_tags():
+    # Seit der Key-Schaetzung (compute_key) kann eine Zeile ohne Key fertig
+    # werden -- fehlender Key triggert daher wie BPM den billigen tags-Pfad.
     row = {"error": "", "embedding": "xyz", "effnet_embedding": "abc", "bpm": "128.0", "key": ""}
+    assert _missing_parts(row) == {"tags"}
+
+
+def test_row_with_estimated_key_is_done():
+    # Ein geschaetzter Key (key_estimated=1) zaehlt als gesetzt -- die Zeile
+    # bleibt fertig und wird nur noch vom Tag-Re-Check angefasst.
+    row = {"error": "", "embedding": "xyz", "effnet_embedding": "abc",
+           "bpm": "128.0", "key": "9m", "key_estimated": "1"}
     assert _missing_parts(row) == set()
 
 
@@ -141,6 +150,16 @@ def test_human_line_volle_analyse():
     assert "Acid House | Deep House" in line
     assert "dark groovy" in line and "1994" in line
     assert "124 BPM 7m" in line and "(5.3s)" in line
+
+
+def test_human_line_markiert_geschaetzten_key():
+    from selecta.analysis import _done_event, _human_line
+    from pathlib import Path
+
+    row = {"bpm": "128.0", "key": "9m", "key_estimated": "1", "error": ""}
+    info = _done_event("tags", Path("x.mp3"), row, 2.0)
+    line = _human_line(info)
+    assert "BPM 128.0 · key ~9m backfilled" in line
 
 
 def test_analyzer_stages_passen_zur_stage_anzahl():

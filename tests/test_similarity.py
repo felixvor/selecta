@@ -2,8 +2,12 @@ import numpy as np
 import pytest
 
 from selecta.similarity import (
+    NOTE_PC,
     harmonic_distance,
+    key_to_pitch_class,
     mood_vector,
+    note_to_camelot,
+    note_to_openkey,
     pair_score,
     parse_key,
     rank_bridge,
@@ -15,6 +19,58 @@ from tests.conftest import get_track
 
 
 # --- Key-Parsing / harmonische Distanz --------------------------------------
+
+def test_note_to_camelot_ankerpunkte():
+    # Referenz: Camelot-Wheel (mixedinkey.com) -- handverifizierte Anker,
+    # kein Roundtrip: der wuerde einen systematischen Off-by-one verstecken.
+    assert note_to_camelot("C", "major") == "8B"
+    assert note_to_camelot("A", "minor") == "8A"
+    assert note_to_camelot("G", "major") == "9B"
+    assert note_to_camelot("E", "minor") == "9A"
+    assert note_to_camelot("F", "major") == "7B"
+    assert note_to_camelot("D", "minor") == "7A"
+    assert note_to_camelot("F#", "minor") == "11A"
+    assert note_to_camelot("Gb", "major") == "2B"
+    assert note_to_camelot("Eb", "minor") == "2A"
+    assert note_to_camelot("B", "major") == "1B"
+    assert note_to_camelot("G#", "minor") == "1A"
+
+
+def test_note_to_openkey_ankerpunkte():
+    # Referenz: Open-Key-Notation (Traktor/Beatport)
+    assert note_to_openkey("C", "major") == "1d"
+    assert note_to_openkey("A", "minor") == "1m"
+    assert note_to_openkey("G", "major") == "2d"
+    assert note_to_openkey("F#", "minor") == "4m"
+    assert note_to_openkey("Eb", "major") == "10d"
+    assert note_to_openkey("F", "minor") == "9m"
+    assert note_to_openkey("D", "minor") == "12m"
+
+
+def test_note_to_camelot_unbekannte_eingabe():
+    assert note_to_camelot("H", "major") == ""  # deutsches 'H' bewusst nicht gemappt
+    assert note_to_camelot("A", "dorian") == ""
+
+
+def test_key_to_pitch_class_unterscheidet_notationen():
+    # Dieselbe Nummer, verschiedene Raeder: Open Key '8m' = Bb-Moll,
+    # Camelot '8A' = A-Moll.
+    assert key_to_pitch_class("8m") == (NOTE_PC["Bb"], "minor")
+    assert key_to_pitch_class("8A") == (NOTE_PC["A"], "minor")
+    assert key_to_pitch_class("1d") == (NOTE_PC["C"], "major")
+    assert key_to_pitch_class("8B") == (NOTE_PC["C"], "major")
+    assert key_to_pitch_class("kaputt") is None
+
+
+def test_key_notation_roundtrip_alle_24_tonarten():
+    # Volle Drehung ueber beide Raeder: Notenname -> Notation ->
+    # Pitch-Class muss die Original-Tonika ergeben.
+    tonics = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
+    for tonic in tonics:
+        for scale in ("major", "minor"):
+            expected = (NOTE_PC[tonic], scale)
+            assert key_to_pitch_class(note_to_camelot(tonic, scale)) == expected
+            assert key_to_pitch_class(note_to_openkey(tonic, scale)) == expected
 
 def test_parse_key_open_key_und_camelot():
     assert parse_key("7m") == (7, "minor")
@@ -33,11 +89,21 @@ def test_parse_key_unparsbar():
 
 def test_harmonic_distance_stufen():
     assert harmonic_distance("7m", "7m") == 0
-    assert harmonic_distance("7m", "7d") == 1     # Paralleltonart
+    assert harmonic_distance("7m", "7d") == 1     # Relativtonart (gleiche Radnummer)
     assert harmonic_distance("7m", "8m") == 1     # Nachbarquinte
     assert harmonic_distance("12m", "1m") == 1    # Wraparound Quintenzirkel
     assert harmonic_distance("7m", "8d") == 2     # Nachbar, anderer Modus
     assert harmonic_distance("7m", "1m") > 2      # deutlicher Bruch
+
+
+def test_harmonic_distance_gemischte_notationen():
+    # Kanonischer Vergleich ueber Pitch-Classes: Open Key 1m und Camelot 8A
+    # sind beide A-Moll -- die rohen Radnummern (1 vs. 8) wuerden faelschlich
+    # einen grossen Abstand ergeben (die Raeder sind um 7 Positionen versetzt).
+    assert harmonic_distance("1m", "8A") == 0
+    assert harmonic_distance("1d", "8B") == 0     # C-Dur in beiden Notationen
+    assert harmonic_distance("2m", "9A") == 0     # E-Moll
+    assert harmonic_distance("1m", "9A") == 1     # A-Moll <-> E-Moll: Nachbarquinte
     assert harmonic_distance("7m", None) is None
 
 

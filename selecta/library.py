@@ -73,16 +73,45 @@ def find_audio_files(music_dir: Path):
     return sorted(files)
 
 
+def missing_parts(row: dict | None) -> set:
+    """Was fehlt einer CSV-Zeile noch? 'embedding' = volle Analyse noetig
+    (teuer, TensorFlow-Modelle), 'tags' = BPM/Key evtl. nachtragbar (billig,
+    kein TF-Modell). Massgeblich ist allein, ob ein Embedding vorhanden ist --
+    'error' ist reine Debug-Info und fliesst nicht in diese Entscheidung ein.
+
+    BPM und Key triggern 'tags': beide sind selbst berechenbar (compute_bpm/
+    compute_key), die Zeile kann also immer fertig werden. Das Jahr dagegen
+    nicht -- es kommt nur aus dem ID3-Tag, eine Zeile ohne Jahr waere sonst
+    fuer immer 'offen'; es wird beim Tag-Re-Check nur "kostenlos"
+    mitgenommen, falls der Tag inzwischen da ist.
+
+    Das effnet_embedding ist der Vollstaendigkeits-Marker des Genre/Vibe-
+    Schemas: Zeilen aus aelteren CSVs (vor genres/vibes) haben zwar ein
+    Track-Embedding, aber kein effnet_embedding -- sie laufen einmal durch
+    die volle Analyse. 'genres' selbst taugt nicht als Marker, weil 'vibes'
+    legitim leer sein darf und ein leeres Pflichtfeld die Zeile fuer immer
+    offen halten wuerde.
+
+    Lebt hier (nicht in analysis.py), damit dir_status()/Library.status()
+    exakt dasselbe Vollstaendigkeits-Kriterium verwenden wie der Analyse-
+    Lauf -- vorher zaehlten die Anzeigen nur 'embedding' und meldeten
+    "0 offen", obwohl die Analyse noch Zeilen anfassen wuerde."""
+    if row is None or not row.get("embedding") or not row.get("effnet_embedding"):
+        return {"embedding"}
+    if not row.get("bpm") or not row.get("key"):
+        return {"tags"}
+    return set()
+
+
 def dir_status(music_dir) -> tuple[int, int]:
-    """(analysierte, gesamt) Audiodateien eines Ordners, nur aus Dateisystem
+    """(vollstaendige, gesamt) Audiodateien eines Ordners, nur aus Dateisystem
     und CSV -- ohne Embeddings zu decodieren (billig genug fuer die
-    Statusspalte im Library-Screen, die alle Ordner scannt)."""
+    Statusspalte im Library-Screen, die alle Ordner scannt). 'Vollstaendig'
+    heisst: missing_parts() haette nichts mehr zu tun -- dasselbe Kriterium
+    wie der Analyse-Lauf."""
     csv_data = load_csv_data(csv_path_for(music_dir))
     files = find_audio_files(Path(music_dir))
-    analyzed = sum(
-        1 for f in files
-        if str(f) in csv_data and csv_data[str(f)].get("embedding")
-    )
+    analyzed = sum(1 for f in files if not missing_parts(csv_data.get(str(f))))
     return analyzed, len(files)
 
 
@@ -197,12 +226,15 @@ class Library:
             self.matrix = None
 
     def status(self) -> tuple[int, int]:
-        """(analysierte, gesamt) Audiodateien ueber alle Ordner. 'Analysiert'
-        heisst: Datei liegt in einem Ordner UND hat eine ok-Zeile mit
-        Embedding."""
+        """(vollstaendige, gesamt) Audiodateien ueber alle Ordner.
+        'Vollstaendig' heisst: Datei liegt in einem Ordner UND ihre Zeile
+        laesst nach missing_parts() nichts mehr offen -- dasselbe Kriterium
+        wie dir_status() und der Analyse-Lauf."""
         files: set[str] = set()
         for music_dir in self.music_dirs:
             files.update(str(f) for f in find_audio_files(music_dir))
-        analyzed_paths = {t["filepath"] for t in self.tracks}
-        analyzed = sum(1 for f in files if f in analyzed_paths)
+        complete_paths = {
+            t["filepath"] for t in self.tracks if not missing_parts(t)
+        }
+        analyzed = sum(1 for f in files if f in complete_paths)
         return analyzed, len(files)

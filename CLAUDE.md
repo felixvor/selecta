@@ -7,8 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Terminal-Tool (Textual-TUI) für DJs: Ein Track dient als Query, die eigene
 Library wird per Audio-Embedding-Cosine ähnlichkeitsgerankt, re-ranked über
 BPM-, Key- und Mood-Penalties. Bewusst **stateless** — keine Playlists, keine
-Sets, kein gespeicherter Pfad; das Set lebt in Rekordbox/Traktor. Kommentare
-und Tests sind auf Deutsch, die README auf Englisch.
+Sets, kein gespeicherter Pfad; das Set lebt in Rekordbox/Traktor.
+Sprachkonvention: **UI-Strings, CLI-Ausgaben und README auf Englisch**
+(OSS-Sichtbarkeit); Kommentare, Docstrings und Tests auf Deutsch.
 
 ## Umgebung & Kommandos
 
@@ -63,19 +64,27 @@ liegt in `~/.local/share/selecta/libraries.json`.
   (56 Tags, gefiltert über `VIBE_WHITELIST`)), Ableitung
   `pick_genres`/`pick_vibes`, Analyse-Loop `run_analysis()` mit
   log/progress/cancelled-**Callbacks**, damit derselbe Loop headless (CLI)
-  und aus der TUI läuft. Resume über die CSV; `_missing_parts()` entscheidet
-  pro Zeile: kein Embedding **oder kein effnet_embedding** → volle (teure)
-  Analyse; kein BPM → billiger Tag-Re-Check + `RhythmExtractor2013`-Fallback.
+  und aus der TUI läuft. Resume über die CSV; `missing_parts()` (lebt in
+  `library.py`, damit die Statusanzeigen dasselbe Kriterium nutzen)
+  entscheidet pro Zeile: kein Embedding **oder kein effnet_embedding** →
+  volle (teure) Analyse; kein BPM → billiger Tag-Re-Check +
+  `RhythmExtractor2013`-Fallback.
 - **`library.py`** — CSV-Persistenz (`load_csv_data`/`compact_csv` =
   dedupliziert + prune), ID3-Tag-Lesen (nur mp3), `prefix_aware_score` für
   die Tipp-Suche (letztes Wort zählt als Präfix, Rest fuzzy via rapidfuzz).
-  `Library` nimmt einen Pfad oder eine Liste; `dir_status()` zählt
-  analysiert/gesamt pro Ordner ohne Embeddings zu decodieren (für die
-  Statusspalte im LibraryScreen).
+  `Library` nimmt einen Pfad oder eine Liste; `missing_parts()` ist DAS
+  Vollständigkeits-Kriterium (auch für den Analyse-Lauf); `dir_status()`
+  und `Library.status()` zählen vollständig/gesamt pro Ordner ohne
+  Embeddings zu decodieren und müssen mit `missing_parts()` übereinstimmen
+  — sonst zeigt das Analyse-Modal "0 open", obwohl der Lauf noch Zeilen
+  anfasst (war ein echter Bug).
 - **`similarity.py`** — `rank_similar` (Score = Embedding-Cosine −
   gewichtete Penalties), `rank_bridge` (Transition A→B), Key-Parsing
   (Open Key `7m`/`12d` **und** Camelot `8A`/`8B`), BPM-Distanz mit
-  Halb-/Doppeltempo.
+  Halb-/Doppeltempo. Notations-Utilities `note_to_camelot`/`note_to_openkey`/
+  `key_to_pitch_class` (kanonischer Vergleich beider Räder — Achtung:
+  Open Key `8m` = Bb-Moll, Camelot `8A` = A-Moll, gleiche Nummer ≠ gleicher
+  Key; die Räder sind um 7 Positionen = 1 Halbton gegeneinander verschoben).
 - **`app.py`** — Textual-App: Chip-Zeile unter dem Track-Label
   (`chip_line`/`fmt_track_cell`: Genres als farbige Pills, Vibes/Jahr
   gedimmt; Zeilenhöhe 2 nur wenn Chips vorhanden), `LibraryScreen`
@@ -86,7 +95,18 @@ liegt in `~/.local/share/selecta/libraries.json`.
   erneut mit `return_paths=True` und `_after_library_change()` hängt
   Query/Ziel auf die neuen Track-Dicts um), `AnalyzeModal` (bekommt eine
   **Liste** von Ordnern und analysiert sie sequenziell als je einen
-  Subprozess). CSS inline in `SelectaApp.CSS`.
+  Subprozess). Transition-Modus: `#transition-bar` über der Tabelle
+  (`fmt_transition_bar`: A links, B rechts, Direkt-Score dazwischen;
+  sichtbar ab der Ziel-Auswahl, damit A nie aus dem Blick gerät) und
+  `◆B`-Marker statt Ranknummer auf der Zeile des Ziels; die Statuszeile
+  zeigt nur noch knapp "Transition" (keine Doppelung zur Bar).
+  CSS inline in `SelectaApp.CSS`.
+- **`scripts/`** — nicht Teil des Pakets: `key_eval.py` (Diagnose
+  Essentia-Key-Schätzung vs. DJ-Tags, siehe Key-Designentscheidung),
+  `demo_library.py` (fiktive Demo-Tracks + handgebaute Embedding-Cluster
+  für README-Assets), `make_screens.py` (SVG-Screenshots via Pilot →
+  `docs/`; nach UI-Änderungen neu ausführen), `demo.tape` (VHS-Drehbuch
+  fürs README-GIF; braucht installiertes `vhs`).
 - **`cli.py`** — Entry Point `selecta` (TUI) und Subcommand `selecta analyze`
   mit verstecktem `--porcelain`-Flag. Porcelain-Protokoll: `::progress i n`
   (Fortschrittsbalken) und `::status {json}` (Events `track`/`stage`/`done`
@@ -104,15 +124,20 @@ liegt in `~/.local/share/selecta/libraries.json`.
   halten den GIL sekundenlang, ein Thread würde die TUI einfrieren. Das
   `AnalyzeModal` startet `python -m selecta analyze --porcelain` und streamt
   stdout.
-- **Key wird nie selbst berechnet** — Essentias KeyExtractor lag gegen
-  Rekordbox-Referenzen zu 85 % einen Halbton daneben. Lieber `?` als eine
-  ratende Zahl; nur BPM wird nachberechnet. Deshalb triggert eine fehlende
-  Key-Spalte auch **nicht** `_missing_parts()` (sonst wäre die Zeile für
-  immer "offen"). Gleiches Prinzip beim Jahr (nur ID3-Tag `TDRC`, nie
-  berechnet) und bei `vibes` (darf legitim leer sein) — Vollständigkeits-
-  Marker des Genre/Vibe-Schemas ist allein `effnet_embedding`, und
-  `pick_genres` übernimmt Top-1 immer, damit `genres` nach einer Analyse
-  nie leer ist.
+- **Key wird geschätzt, aber sichtbar als Schätzung** (`compute_key`,
+  Profil `config.KEY_PROFILE=edmm`, fest 440 Hz, Notation
+  `config.KEY_NOTATION`): Der frühere Befund "KeyExtractor liegt zu 85 %
+  einen Halbton daneben" war ein Vergleichs-Artefakt (Open-Key- vs.
+  Camelot-Nummern, um 7 Positionen = 1 Halbton versetzt; `scripts/
+  key_eval.py` misst 0 % Halbton-Fehler, ~75 % exakt). Geschätzte Keys
+  tragen das `key_estimated`-Flag, werden gedimmt mit `~`-Präfix
+  angezeigt, fließen voll ins Ranking und werden von jedem später
+  auftauchenden DJ-Tag überschrieben (Flag fällt). Tuning-Korrektur
+  bewusst NICHT (verschlechtert die Quote). Fehlender Key triggert wie
+  BPM den billigen `tags`-Pfad. Das Jahr bleibt Tag-only (nie berechnet),
+  `vibes` darf leer sein — Vollständigkeits-Marker des Genre/Vibe-Schemas
+  ist allein `effnet_embedding`, und `pick_genres` übernimmt Top-1 immer,
+  damit `genres` nach einer Analyse nie leer ist.
 - **`effnet_embedding` (1280-dim, gemittelt) wird mit persistiert**, damit
   künftige neue Classification-Heads als reiner CSV-Backfill laufen können
   (Head auf dem Mittel ≈ Mittel der Head-Outputs; für Tags ok) — ohne
@@ -177,3 +202,14 @@ liegt in `~/.local/share/selecta/libraries.json`.
 - `~/.local/share/selecta/last_dir` (Vorgänger-Format, ein einziger
   gemerkter Pfad) wird von `load_libraries()` nur noch als einmalige
   Migration gelesen, wenn `libraries.json` fehlt.
+
+
+
+## Offene TODOs (Nutzer):
+
+- `docs/demo.gif` erzeugen, sobald `vhs` (+ ttyd/ffmpeg) in WSL
+  installiert ist: `python scripts/demo_library.py /tmp/selecta-demo/demo-crate
+  && vhs scripts/demo.tape`, danach das GIF oben in der README verlinken.
+
+- Im Analyselog steht 0 von 833 tracks analyzed, 833 open aber der wert ändert sich nicht während der analyse. entweder live anpassen oder weglassen.
+- im analyselog sehe ich bei den tracks immer ? BPM und ? als key, warum? den wert sagen wir doch für die tracks voraus oder nicht? keine ? mehr, entweder wir analysieren den wert selbst oder übernehmen/aktualisieren auf basis der metadaten in des soundfiles
