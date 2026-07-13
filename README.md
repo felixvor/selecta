@@ -25,6 +25,10 @@ A terminal tool for set preparation and live DJing: finds the right next track w
 - **Multiple libraries, one search.** Register your music folders once in
   the launcher, toggle any combination active, and search across all of
   them. Each folder keeps its own analysis CSV and stays portable.
+- **See your library, not just a list.** `Ctrl+G` renders a 2D map of every
+  track's embedding as a self-contained HTML file (dark, zoomable, no
+  server) — a quick way to tell whether you're mixing from one small
+  corner of your collection or the whole thing.
 
 ## Requirements
 
@@ -106,6 +110,7 @@ result** makes it the new query (that's how you walk through a set).
 | `,` `.` | BPM filter: hard cutoff (only faster or slower tracks), each press snaps to the next BPM value present in the library |
 | `Ctrl+A` | Analyze all active libraries in sequence (confirmation → progress + live per-track log: analysis stages while running, then genre/vibe tags and scores per finished track) |
 | `Ctrl+T` | Pin a transition target (fuzzy search + Enter): the list shows bridge tracks between the current query and the target |
+| `Ctrl+G` | Render a 2D map of the active libraries' embeddings and open it in your browser |
 | `Ctrl+L` | Back to the library launcher (switch libraries mid-session) |
 | `Esc` | Clear the search / go back |
 | `Ctrl+C` / `Ctrl+Q` | Quit |
@@ -158,15 +163,53 @@ threshold lives in `selecta/config.py`.
 **Transition mode** (`Ctrl+T`): pin a target track B, and the list shows
 bridge candidates with SCORE→A and SCORE→B (≥0.9 green, ≥0.8 yellow,
 ≥0.7 orange, red below), sorted by the weaker side — the bottleneck
-decides whether a bridge works. A **transition bar** above the list
-always shows where you are: query A on the left, target B on the right,
-and the direct A→B score in between — the gap you are bridging. B itself
-is ranked along with the rest (marked `◆B` in the list) and rises to the
-top once the direct jump is the best option. **Enter** on a candidate
-makes it the new query (B stays pinned, the bar follows — that's how you
-work your way from a slow opener to a hard closer), **Enter on B**,
-**Esc** or pressing `Ctrl+T` again ends the mode. The BPM filter
-(`,` `.`) stays active; the energy axis is disabled in transition mode.
+decides whether a bridge works. BPM and key are shown to *both* sides at
+once without doubling the table: the BPM cell reads `129 +2/−4` (delta to
+A, then to B) and the key cell reads `7m ●●` (one dot per side, same
+green/yellow/dim compatibility colors as elsewhere); the full score
+breakdown for both sides (`→A … →B …`) is in the detail line at the
+bottom as you move the cursor. Typing still searches the whole library —
+pinning a target doesn't lock you out of finding a specific candidate by
+name, the search just gains the same SCORE→A/→B columns. A **transition
+bar** above the list always shows where you are: query A on the left,
+target B on the right, and the direct A→B score in between — the gap you
+are bridging. B itself is ranked along with the rest (marked `◆B` in the
+list) and rises to the top once the direct jump is the best option.
+**Enter** on a candidate makes it the new query (B stays pinned, the bar
+follows — that's how you work your way from a slow opener to a hard
+closer), **Enter on B**, **Esc** or pressing `Ctrl+T` again ends the
+mode. The BPM filter (`,` `.`) stays active; the energy axis is disabled
+in transition mode.
+
+Tracks you've already used as a query this session are marked with a
+dimmed `✓` in front of their rank number and a dimmed label — a quick way
+to see what you've already played without losing it from the list (it's
+still a valid pick, and never penalized in the ranking). This is
+per-session only, nothing is written to disk.
+
+### Library map
+
+![Library map: every track's embedding, plotted](docs/map.png)
+
+`Ctrl+G` (or `selecta map --music-dir DIR [--music-dir DIR2 ...]` headless)
+projects every analyzed track's embedding down to 2D and writes a
+self-contained HTML file — dark background, one glowing dot per track,
+colored by its top genre, sized by BPM. Hover a point for the same info
+the chip line shows (BPM, key, genres, vibes, mood); scroll to zoom,
+drag to pan, double-click to reset. It answers a question the ranking
+list can't: are you circling one small corner of your collection, or
+does your library actually have range? No CDN, no server, no telemetry —
+open the file anywhere.
+
+The projection uses only the raw track embedding, never metadata — genre
+and BPM are colors and tooltips, not part of the geometry, so the map
+stays honest about what's actually *similar-sounding*. By default it
+falls back to a dependency-free PCA; install the optional extra for a
+sharper layout that keeps genuinely separate clusters apart:
+
+```bash
+pip install -e ".[map]"
+```
 
 ## Development
 

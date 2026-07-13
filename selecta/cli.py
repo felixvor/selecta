@@ -46,6 +46,29 @@ def _headless_analyze(argv):
     print(f"Done: {done} analyzed, {errors} errors.", flush=True)
 
 
+def _map_command(argv):
+    parser = argparse.ArgumentParser(prog="selecta map", description="Render a 2D map of the library's track embeddings")
+    parser.add_argument("--music-dir", action="append", required=True,
+                        help="folder with an analyzed library_analysis.csv (repeatable for multiple libraries)")
+    parser.add_argument("--out", default=None, help="output HTML path (default: first --music-dir/selecta_map.html)")
+    parser.add_argument("--no-open", action="store_true", help="do not open the browser")
+    args = parser.parse_args(argv)
+
+    from .map import open_in_browser, write_map
+
+    def log(msg):
+        print(msg, flush=True)
+
+    try:
+        path = write_map(args.music_dir, out_path=args.out, log=log)
+    except RuntimeError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(str(path), flush=True)
+    if not args.no_open:
+        open_in_browser(path)
+
+
 def _run_tui(argv):
     parser = argparse.ArgumentParser(prog="selecta", description="SELECTA -- terminal companion for DJing")
     parser.add_argument("music_dir", nargs="?", default=None, help="music folder (otherwise the launcher asks)")
@@ -65,6 +88,8 @@ def main():
     argv = sys.argv[1:]
     if argv and argv[0] == "analyze":
         _headless_analyze(argv[1:])
+    elif argv and argv[0] == "map":
+        _map_command(argv[1:])
     else:
         _run_tui(argv)
 

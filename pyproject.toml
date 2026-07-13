@@ -14,6 +14,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest==9.1.1", "pytest-asyncio==1.4.0"]
+# Bessere Projektion fuer die Library-Map (Ctrl+G/`selecta map`) -- ohne
+# dieses Extra faellt project_2d() automatisch auf eine reine-numpy-PCA
+# zurueck (siehe selecta/map.py), die App laeuft auch ohne voll funktionsfaehig.
+# Achtung: pacmap zieht numpy<2.5 (getestet: downgrade auf 2.4.6), pip
+# meldet dabei einen Versionskonflikt mit der exakten numpy==2.5.1-Pinnung
+# oben, installiert aber trotzdem -- gepruefte, funktionierende Kombination.
+map = ["pacmap==0.9.1"]
 
 [project.scripts]
 selecta = "selecta.cli:main"

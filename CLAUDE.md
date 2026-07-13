@@ -79,28 +79,49 @@ liegt in `~/.local/share/selecta/libraries.json`.
   — sonst zeigt das Analyse-Modal "0 open", obwohl der Lauf noch Zeilen
   anfasst (war ein echter Bug).
 - **`similarity.py`** — `rank_similar` (Score = Embedding-Cosine −
-  gewichtete Penalties), `rank_bridge` (Transition A→B), Key-Parsing
+  gewichtete Penalties), `rank_bridge` (Transition A→B; jedes Ergebnis
+  trägt `parts_a`/`parts_b` = `pair_score_parts()`-Dicts mit den rohen
+  Einzeltermen, Grundlage der Bridge-Warum-Zeile), Key-Parsing
   (Open Key `7m`/`12d` **und** Camelot `8A`/`8B`), BPM-Distanz mit
   Halb-/Doppeltempo. Notations-Utilities `note_to_camelot`/`note_to_openkey`/
   `key_to_pitch_class` (kanonischer Vergleich beider Räder — Achtung:
   Open Key `8m` = Bb-Moll, Camelot `8A` = A-Moll, gleiche Nummer ≠ gleicher
   Key; die Räder sind um 7 Positionen = 1 Halbton gegeneinander verschoben).
+  `pair_score()` ist ein dünner Wrapper um `pair_score_parts()["score"]`.
 - **`app.py`** — Textual-App: Chip-Zeile unter dem Track-Label
   (`chip_line`/`fmt_track_cell`: Genres als farbige Pills, Vibes/Jahr
-  gedimmt; Zeilenhöhe 2 nur wenn Chips vorhanden), `LibraryScreen`
+  gedimmt; Zeilenhöhe 2 nur wenn Chips vorhanden; `played`-Flag dimmt das
+  Label zusätzlich), `LibraryScreen`
   (Launcher mit ASCII-Logo: Libraries an/abwählen [Space/Klick], anlegen
   [A, `AddLibraryModal`], entfernen [D], analysieren [Ctrl+A], Enter
   startet alle aktiven; Persistenz `load_libraries`/`save_libraries`),
-  `MainScreen` (Suche/Ranking/Transition; Ctrl+L pusht den LibraryScreen
-  erneut mit `return_paths=True` und `_after_library_change()` hängt
-  Query/Ziel auf die neuen Track-Dicts um), `AnalyzeModal` (bekommt eine
-  **Liste** von Ordnern und analysiert sie sequenziell als je einen
-  Subprozess). Transition-Modus: `#transition-bar` über der Tabelle
-  (`fmt_transition_bar`: A links, B rechts, Direkt-Score dazwischen;
-  sichtbar ab der Ziel-Auswahl, damit A nie aus dem Blick gerät) und
-  `◆B`-Marker statt Ranknummer auf der Zeile des Ziels; die Statuszeile
-  zeigt nur noch knapp "Transition" (keine Doppelung zur Bar).
+  `MainScreen` (Suche/Ranking/Transition; `self.played` = Session-
+  Gedächtnis gespielter Filepaths, siehe Designentscheidungen; Ctrl+L
+  pusht den LibraryScreen erneut mit `return_paths=True` und
+  `_after_library_change()` hängt Query/Ziel auf die neuen Track-Dicts
+  um), `AnalyzeModal` (bekommt eine **Liste** von Ordnern und analysiert
+  sie sequenziell als je einen Subprozess). Transition-Modus:
+  `#transition-bar` über der Tabelle (`fmt_transition_bar`: A links,
+  B rechts, Direkt-Score dazwischen; sichtbar ab der Ziel-Auswahl, damit
+  A nie aus dem Blick gerät) und `◆B`-Marker statt Ranknummer auf der
+  Zeile des Ziels; die Statuszeile zeigt nur noch knapp "Transition"
+  (keine Doppelung zur Bar). Bridge-Zellen `fmt_bpm_cell_ab`/
+  `fmt_key_cell_ab` (Slash-Delta bzw. zwei Farbpunkte zu A/B, siehe
+  Designentscheidungen) und `fmt_bridge_why_line` (Detail-Zeile mit
+  Score-Zerlegung zu beiden Seiten). Ctrl+G (`action_map`/`_run_map`)
+  rechnet die Library-Map als Subprozess (`selecta map --no-open`) und
+  ruft danach `map.open_in_browser()` im TUI-Prozess.
   CSS inline in `SelectaApp.CSS`.
+- **`map.py`** — Library-Map als selbstständige HTML-Datei (kein CDN,
+  Canvas-JS inline, dunkler Hackerlook). `project_2d()`: pacmap > umap >
+  reine-numpy-PCA-Fallback (lazy imports, `pip install selecta[map]` für
+  pacmap — optional, Kern-Installation/Tests laufen ohne). Projiziert
+  wird NUR das L2-normierte Track-Embedding (`Library.matrix`), niemals
+  Metadaten — die sind Anzeige-Kanäle (Farbe = Top-1-Genre über
+  `_genre_color_hex`, eine map.py-eigene Kopie von `app.genre_chip_color`s
+  Hash-Logik, um den Kreisimport mit app.py zu vermeiden; Punktgröße =
+  BPM; Tooltip = Chip-Infos). `write_map()`/`open_in_browser()` von der
+  CLI (`selecta map`) und der TUI (Ctrl+G) genutzt.
 - **`scripts/`** — nicht Teil des Pakets: `energy_eval.py` (Diagnose der
   Energie-Achse auf echten Library-CSVs: churn/discovery/direction-Metriken
   über Ranking-Varianten — Grundlage der z-Subspace-Designentscheidung),
@@ -110,8 +131,10 @@ liegt in `~/.local/share/selecta/libraries.json`.
   `make_screens.py` (SVG-Screenshots via Pilot → `docs/`; nach
   UI-Änderungen neu ausführen), `demo.tape` (VHS-Drehbuch fürs README-GIF;
   braucht installiertes `vhs`).
-- **`cli.py`** — Entry Point `selecta` (TUI) und Subcommand `selecta analyze`
-  mit verstecktem `--porcelain`-Flag. Porcelain-Protokoll: `::progress i n`
+- **`cli.py`** — Entry Point `selecta` (TUI), Subcommand `selecta analyze`
+  mit verstecktem `--porcelain`-Flag, Subcommand `selecta map --music-dir
+  DIR [--music-dir DIR2 ...] [--out FILE] [--no-open]` (siehe map.py).
+  Porcelain-Protokoll: `::progress i n`
   (Fortschrittsbalken) und `::status {json}` (Events `track`/`stage`/`done`
   aus `run_analysis`; `done` trägt Genres/Vibes/BPM/Scores und speist die
   Chip-Ergebniszeile im Analyse-Log, `stage` die Live-Statuszeile mit den
@@ -178,6 +201,26 @@ liegt in `~/.local/share/selecta/libraries.json`.
 - **Transition-Sortierung nach `min(score_a, score_b)`** — der Engpass
   entscheidet, ob eine Brücke funktioniert. B läuft selbst als Kandidat mit
   (`score_b == 1.0`) und steht oben, sobald der Direktsprung am besten ist.
+- **Bridge-Zellen kompakt statt zwei Spaltensätze**: BPM zu A UND B wird
+  als eine Slash-Zelle gezeigt (`129 +2/−4`, `fmt_bpm_cell_ab`), Key als
+  zwei Farbpunkte (`7m ●●`, `fmt_key_cell_ab`) — dieselben Farbschwellen
+  wie die normalen Zellen, nur zweimal in einer Zelle. Mood-Distanz zu
+  beiden Seiten steht NICHT in Spalten, sondern ausschließlich in der
+  Detail-Zeile (`fmt_bridge_why_line`) — Breite bleibt fast wie im
+  einfachen Ranking. Auf der `◆B`-Zeile (Kandidat ist das Ziel selbst)
+  zeigt die B-Seite bewusst `—`/`·` statt `+0/−0`-Rauschen.
+- **Suche bleibt im Transition-Modus die gleiche Suche**: Tippen mit
+  gepinntem Ziel B bricht den Modus NICHT ab, sondern zeigt Fuzzy-Treffer
+  mit den Bridge-Spalten (`_show_scored_filter`, Zweig `transition_target
+  is not None`) — man kann jederzeit einen zu A passenden Kandidaten
+  suchen, ohne die Transition zu verlassen.
+- **Session-Gedächtnis „gespielt"** (`MainScreen.played`, nur RAM): jeder
+  Track, der einmal Query (A) wurde, bekommt in allen Listen einen
+  gedimmten `✓`-Präfix vor der Ranknummer (`fmt_rank_cell`) und ein
+  gedimmtes Label — reine Anzeige, KEIN Ranking-Malus. Nur Anvisieren als
+  Transition-Ziel zählt noch nicht als gespielt, erst wenn der Track
+  selbst zu A wird. Passt zur „stateless"-Philosophie: Session-Kontext
+  wie die Energie-Stufe, kein persistiertes Set.
 - **BPM-Filter (`,`/`.`) springt auf real vorhandene BPM-Werte** der
   Library, nicht in festen Schritten (`_next_bpm_offset`).
 - **Tastatur-Konvention (fzf-Stil)**: Druckbare Tasten tippen IMMER in die
@@ -210,6 +253,23 @@ liegt in `~/.local/share/selecta/libraries.json`.
 - **TF-Logging**: `TF_CPP_MIN_LOG_LEVEL` muss VOR jedem Essentia-Import
   gesetzt sein (steht am Modulanfang von `analysis.py`); C++-seitiger
   Lärm wird zusätzlich über `filtered_stderr` weggefiltert.
+- **Library-Map als HTML-Export, nicht im TUI-Prozess**: PaCMAP/UMAP/PCA
+  können sekundenlang laufen, das würde die TUI einfrieren (gleiche
+  Begründung wie beim Analyse-Subprozess) — Ctrl+G startet `python -m
+  selecta map --no-open` als Subprozess, öffnet den Browser erst danach
+  im TUI-Prozess. Bewusst NICHT Ctrl+M (im Terminal byte-identisch mit
+  Enter/CR, nicht unterscheidbar), sondern Ctrl+G.
+  Projektion läuft NUR über das rohe Track-Embedding, nie über Metadaten
+  gemischt — sonst weiß man bei zwei benachbarten Punkten nicht mehr, ob
+  sie klanglich nah sind oder nur zufällig dieselbe BPM/Genre haben.
+  Kein HDBSCAN/eigene Clusterung: Farbe kommt aus dem ohnehin vorhandenen
+  Top-1-Genre. Kein Plotly/D3 — ~200 Zeilen eigenes Canvas-JS, damit die
+  Datei wirklich ohne jede externe Ressource funktioniert (Test prüft
+  `http(s)://` kommt nirgends vor). `pacmap` ist ein optionales Extra
+  (`pip install selecta[map]`) und zieht `numpy<2.5`, was pip als
+  Konflikt mit der exakten `numpy==2.5.1`-Pinnung meldet, aber trotzdem
+  installiert (geprüft, funktioniert) — ohne das Extra läuft `project_2d`
+  automatisch über den numpy-only-PCA-Fallback.
 
 ## Stolperfallen
 
@@ -237,6 +297,36 @@ liegt in `~/.local/share/selecta/libraries.json`.
   nehmen (Library anlegen, analysieren mit Skip zu 100%). Heikel: der
   Launcher liest die ECHTE libraries.json des Nutzers — dafür müsste
   demo.tape mit isoliertem HOME laufen.
+- Demo-GIF nach der Ctrl+G/Bridge-Zellen-Erweiterung noch nicht neu
+  gerendert (auf Nutzerwunsch übersprungen) — vor dem nächsten Release-
+  Push nachholen, sonst zeigt es den alten Transition-Screen ohne
+  Slash-BPM/Key-Punkte.
+- **Order-Set-Idee (Konzept, nicht umgesetzt):** Ctrl+O startet einen
+  "Ordering"-Modus — mehrere Tracks (bis N) werden nacheinander
+  ausgewählt/abgewählt (Suche/Ranking bleiben nutzbar, orientieren sich
+  an "zuletzt hinzugefügt"), sichtbar in einer Leiste; "Fertig" berechnet
+  die Reihenfolge mit minimalen Sprüngen zwischen den gewählten Tracks
+  (im Kern ein kleines TSP über `pair_score`/`pair_score_parts`) und
+  zeigt die Distanz zwischen jedem Schritt, optional mit
+  Brücken-Vorschlägen für die größten verbleibenden Sprünge. Nutzer:
+  "ich weiß, welche Songs ich spielen will, aber nicht in welcher
+  Reihenfolge." Ausdrücklich als Diskussionsvorschlag markiert (nicht
+  1:1 umzusetzen) — offene Fragen vor dem Bauen: eigener Modus oder
+  Erweiterung des Transition-Modus (der ja schon A→B-Brücken kann)?
+  Eigene UI-Leiste für die Auswahl oder reicht die Statuszeile? Lohnt
+  sich exaktes TSP (bei kleinem N problemlos, z.B. Held-Karp) oder reicht
+  ein gieriger Nearest-Neighbor-Ansatz, der besser zur "schlank, sofort
+  nachvollziehbar"-Linie des Tools passt? Muss noch mit dem Nutzer
+  abgestimmt werden, bevor hier Code entsteht.
+
+Erledigt (2026-07-13): `IMPLEMENTATION_PLAN.md` (Gespielt-Markierung,
+Library-Map, Transition-Deltas) vollständig umgesetzt — Session-Haken
+für gespielte Tracks (`MainScreen.played`, reine Anzeige); Bridge-Zellen
+kompakt (Slash-BPM, Key-Punkte, `fmt_bridge_why_line`), Suche bleibt im
+Transition-Modus nutzbar; `selecta/map.py` + `selecta map`-Subcommand +
+Ctrl+G (2D-Landkarte der Track-Embeddings, PaCMAP/UMAP/PCA-Fallback,
+kein CDN). 117 Tests grün. Plan-Datei nach Umsetzung entfernt (Zweck
+erfüllt, Details stehen jetzt hier bzw. im Code).
 
 Erledigt (2026-07-12): Live-Zähler im Analyselog statt statischem
 "X of Y"-Satz; '? BPM ?'-Bug (Voll-Analyse rechnet BPM/Key jetzt selbst,
@@ -260,3 +350,5 @@ tag-gestrippte Dateien fuer den Analyse-Teil), dann `vhs
 scripts/demo.tape`. Vor JEDEM Re-Render demo_library.py neu ausfuehren
 (der Lauf im GIF schreibt die Seeds in die CSV). `~/Music` und
 `/tmp/selecta-home` sind reine Demo-Artefakte und koennen jederzeit weg.
+
+order set funktion: strg o startet "ordering" modus, man kann nun lieder selecten oder deselecten. selected songs werden übersichtlich oben oder an der seite rechts angezeigt. suche und ähnlichkeitsmaß funktionieren weiter und orientieren sich an "zuletzt hinzugefügt". bis zu N songs können hinzugefügt werden. dann "fertig" -> es rechnet / ladebalken (wenn nätig), ergebnis: wie die beste reihenfolge der songs aussehen würde um die sprünge zwischen den songs minimal zu halten. konzeptidee. ich weiß welche songs ich spielen will aber nicht in welcher reihenfolge. distanz zwischen jedem song wird anzeigt im ergebnis, (insert funktion um große sprünge die bleiben zu brücken?) ziemlich umfangreiche idee, große baustelle, muss nicht 1zu1 so umgesetzt werden, mit dem nutzer diskutieren und absprechen wie hier die eleganteste und charmantese lösung aussieht. muss zur vision und feeling des aktuellen programms passen, schlank easy nachvollziehbar. geht das überhaupt oder lieber scratchen?

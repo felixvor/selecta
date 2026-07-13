@@ -9,6 +9,7 @@ from selecta.similarity import (
     note_to_camelot,
     note_to_openkey,
     pair_score,
+    pair_score_parts,
     parse_key,
     rank_bridge,
     rank_similar,
@@ -279,3 +280,20 @@ def test_energie_hoch_bevorzugt_energetischen_track(synthetic_library):
     # nach unten umgekehrt.
     assert pos(up, "house_fast.mp3") < pos(up, "house_slow.mp3")
     assert pos(down, "house_slow.mp3") < pos(down, "house_fast.mp3")
+
+
+def test_pair_score_parts_summiert_zum_pair_score(synthetic_library):
+    a = get_track(synthetic_library, "house_a.mp3")
+    b = get_track(synthetic_library, "techno.mp3")
+    parts = pair_score_parts(a, b)
+    assert parts["score"] == pytest.approx(pair_score(a, b), abs=1e-6)
+
+
+def test_rank_bridge_traegt_parts_zu_beiden_seiten(synthetic_library):
+    a = get_track(synthetic_library, "house_a.mp3")
+    b = get_track(synthetic_library, "techno.mp3")
+    results = rank_bridge(a, b, synthetic_library)
+    row = next(r for r in results if r["track"]["filepath"] == "house_fast.mp3")
+    assert row["parts_a"]["score"] == pytest.approx(row["score_a"], abs=1e-6)
+    assert row["parts_b"]["score"] == pytest.approx(row["score_b"], abs=1e-6)
+    assert set(row["parts_a"]) == {"score", "cos_sim", "bpm_pen", "key_pen", "mood_dist"}

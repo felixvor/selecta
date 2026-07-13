@@ -51,6 +51,7 @@ from .library import Library, dir_status, fuzzy_search, track_label
 from .similarity import (
     harmonic_distance,
     pair_score,
+    pair_score_parts,
     parse_key,
     rank_bridge,
     rank_similar,
@@ -93,7 +94,9 @@ def render_logo() -> Text:
 # -- keine Buchstaben, mit denen ein Titel beginnen koennte.
 ACTION_KEYS = {"left", "right", "comma", "full_stop"}
 # Chords, die IMMER Aktionen ausloesen (fzf-Konvention: Aktionen auf Ctrl).
-CTRL_ACTION_KEYS = {"ctrl+a", "ctrl+t", "ctrl+l"}
+# Bewusst NICHT Ctrl+M fuer die Map -- ^M ist im Terminal byte-identisch
+# mit Enter (Carriage Return), Textual kann das nicht unterscheiden.
+CTRL_ACTION_KEYS = {"ctrl+a", "ctrl+t", "ctrl+l", "ctrl+g"}
 
 FILTER_COLUMNS = ("#", "TRACK", "BPM", "KEY")
 RESULT_COLUMNS = ("#", "TRACK", "BPM", "KEY", "SCORE", "ΔENERG", "ΔHARD", "ΔMOOD")
@@ -137,18 +140,31 @@ def chip_line(track: dict) -> Text | None:
     return line
 
 
-def fmt_track_cell(track: dict) -> tuple[Text, int]:
+def fmt_track_cell(track: dict, played: bool = False) -> tuple[Text, int]:
     """TRACK-Zelle inkl. benoetigter Zeilenhoehe: Label, darunter die
     Chip-Zeile (falls vorhanden -> Hoehe 2, sonst 1). Das Label ist fett --
     Schriftgroessen gibt es im Terminal nicht, die Hierarchie Label ueber
-    Chips entsteht ueber Gewicht (bold) und Helligkeit (Chips gedimmt)."""
-    label = Text(track_label(track), style="bold")
+    Chips entsteht ueber Gewicht (bold) und Helligkeit (Chips gedimmt).
+
+    played: Track war in dieser Session schon Query -- Label gedimmt statt
+    hell, Chips bleiben unveraendert (nur ein Prinzip pro Zeile, siehe
+    Rank-Zelle in den Aufrufern fuer den '✓'-Haken)."""
+    label = Text(track_label(track), style="bold dim" if played else "bold")
     chips = chip_line(track)
     if chips is None:
         return label, 1
     label.append("\n")
     label.append(chips)
     return label, 2
+
+
+def fmt_rank_cell(index: int, played: bool) -> Text:
+    """Rang-Zelle fuer Listen ohne Sonder-Marker (kein Transition-Ziel):
+    '✓7' gedimmt, wenn der Track in dieser Session schon Query war --
+    reine Anzeige, kein Ranking-Malus."""
+    if played:
+        return Text(f"✓{index}", style="dim")
+    return Text(str(index))
 
 
 def fmt_analysis_log_line(info: dict) -> Text:
@@ -222,6 +238,84 @@ def fmt_bpm_cell(track: dict, query: dict | None) -> Text:
     rel = relative_bpm_distance(q_bpm, bpm)
     style = "green" if rel <= 0.02 else ("yellow" if rel <= 0.06 else "dim")
     return Text(f"{bpm:.0f} ({bpm - q_bpm:+.0f})", style=style)
+
+
+def _bpm_delta_text(bpm: float, ref_bpm) -> tuple[str, str]:
+    """(Text, Style) fuer EIN BPM-Delta ggue. einer Referenz -- Baustein
+    fuer fmt_bpm_cell_ab, dieselben Schwellen wie fmt_bpm_cell."""
+    ref = _to_float(ref_bpm)
+    if ref is None:
+        return "·", "dim"
+    rel = relative_bpm_distance(ref, bpm)
+    style = "green" if rel <= 0.02 else ("yellow" if rel <= 0.06 else "dim")
+    return f"{bpm - ref:+.0f}", style
+
+
+def fmt_bpm_cell_ab(track: dict, a: dict, b: dict) -> Text:
+    """BPM-Zelle im Bridge-Modus: 'bpm  +2/−4' -- Delta zu A, dann zu B,
+    einzeln gefaerbt. Kompakter als zwei Spalten (siehe fmt_key_cell_ab).
+    Ist der Kandidat selbst das Ziel B (◆B-Zeile), waere die B-Seite nur
+    '+0/−0'-Rauschen -- dort steht statt dessen ein '—'."""
+    bpm = _to_float(track.get("bpm"))
+    if bpm is None:
+        return Text("?", style="dim")
+    text = Text(f"{bpm:.0f} ")
+    d_a, style_a = _bpm_delta_text(bpm, a.get("bpm"))
+    text.append(d_a, style=style_a)
+    text.append("/", style="dim")
+    if track["filepath"] == b.get("filepath"):
+        text.append("—", style="dim")
+    else:
+        d_b, style_b = _bpm_delta_text(bpm, b.get("bpm"))
+        text.append(d_b, style=style_b)
+    return text
+
+
+def _key_dot_style(key: str, ref_key) -> str:
+    rel = harmonic_distance(ref_key, key)
+    if rel is None:
+        return "dim"
+    return "green" if rel <= 1 else ("yellow" if rel == 2 else "dim")
+
+
+def fmt_key_cell_ab(track: dict, a: dict, b: dict) -> Text:
+    """Key-Zelle im Bridge-Modus: 'key ●●' -- ein Farbpunkt fuer die
+    harmonische Kompatibilitaet zu A, einer zu B. Kompakter als zwei
+    eigene Spalten und trotzdem beide Seiten auf einen Blick. Fuer die
+    ◆B-Zeile (Kandidat IST das Ziel) steht der zweite Punkt als '·'
+    (neutral) statt trivial gruen -- Gleiches mit sich selbst ist keine
+    Information."""
+    key = (track.get("key") or "").strip()
+    if not key:
+        return Text("?", style="dim")
+    shown = display_key(track)
+    estimated = bool(track.get("key_estimated"))
+    text = Text(shown, style="dim" if estimated else "")
+    text.append(" ")
+    text.append("●", style=_key_dot_style(key, a.get("key")))
+    if track["filepath"] == b.get("filepath"):
+        text.append("·", style="dim")
+    else:
+        text.append("●", style=_key_dot_style(key, b.get("key")))
+    return text
+
+
+def fmt_bridge_why_line(result: dict) -> str:
+    """Score-Zerlegung fuer die Detail-Zeile im Bridge-Modus: die Rechnung
+    zu BEIDEN Seiten (→A und →B), analog zu fmt_why_line im Ranking-Modus.
+    Mood steckt hier NICHT in eigenen Spalten (siehe fmt_bpm_cell_ab/
+    fmt_key_cell_ab) -- diese Zeile ist die einzige Stelle, an der die
+    Mood-Distanz zu beiden Seiten sichtbar wird."""
+    def side(label: str, parts: dict) -> str:
+        bpm_cost = None if parts["bpm_pen"] is None else W_BPM * min(parts["bpm_pen"], 1.0)
+        key_cost = None if parts["key_pen"] is None else W_KEY * (parts["key_pen"] / 8.0)
+        mood_cost = W_MOOD * (parts["mood_dist"] / 2.5)
+        bpm_s = "–" if bpm_cost is None else f"{bpm_cost:.2f}"
+        key_s = "–" if key_cost is None else f"{key_cost:.2f}"
+        return (f"{label} [b]{parts['score']:.3f}[/] = cos {parts['cos_sim']:.3f}"
+                f" − bpm {bpm_s} − key {key_s} − mood {mood_cost:.2f}")
+
+    return f"{side('→A', result['parts_a'])}   {side('→B', result['parts_b'])}"
 
 
 def display_key(track: dict) -> str:
@@ -416,9 +510,15 @@ class MainScreen(Screen):
         self.energy = 0
         self.bpm_offset = 0
         self._row_tracks: list[dict] = []
-        # Result-Dicts parallel zu _row_tracks (nur im Similarity-Modus) --
-        # Quelle der Score-Zerlegung in der Detail-Zeile.
+        # Result-Dicts parallel zu _row_tracks (nur im Similarity-/Bridge-
+        # Modus) -- Quelle der Score-Zerlegung in der Detail-Zeile.
         self._row_results: list[dict] | None = None
+        self._row_bridge = False  # welche Warum-Zeilen-Variante _row_results traegt
+        # Session-Gedaechtnis: Filepaths aller bisherigen Queries. Bewusst
+        # nur RAM (kein Persistieren) -- "stateless" bezieht sich auf
+        # Sets/Playlists, aber welche Tracks man in DIESER Session schon
+        # gespielt hat, ist reiner Anzeige-Kontext wie die Energie-Stufe.
+        self.played: set[str] = set()
         self._results_shown = False
         self._status_cache: tuple[int, int] | None = None
 
@@ -442,7 +542,7 @@ class MainScreen(Screen):
         self.query_one("#logo", Static).update(Text(LOGO, style="bold magenta"))
         self.query_one("#keybar", Static).update(
             "[b]Enter[/b] select+copy  [b]↑↓[/b] navigate  [b]←→[/b] energy  [b],[/b][b].[/b] BPM filter  "
-            "[b]^a[/b] analyze  [b]^t[/b] transition  [b]^l[/b] libraries  [b]Esc[/b] clear  [b]^c[/b] quit"
+            "[b]^a[/b] analyze  [b]^t[/b] transition  [b]^g[/b] map  [b]^l[/b] libraries  [b]Esc[/b] clear  [b]^c[/b] quit"
         )
         self._update_header()
         self.refresh_status()
@@ -536,7 +636,7 @@ class MainScreen(Screen):
 
     # --- Listen-Befuellung ---
 
-    def _fill_table(self, columns, rows, tracks, border_title, heights=None, results=None):
+    def _fill_table(self, columns, rows, tracks, border_title, heights=None, results=None, bridge=False):
         table = self.query_one(ResultsTable)
         table.clear(columns=True)
         table.add_columns(*columns)
@@ -544,6 +644,7 @@ class MainScreen(Screen):
             table.add_row(*row, height=heights[i] if heights else 1)
         self._row_tracks = tracks
         self._row_results = results
+        self._row_bridge = bridge
         if tracks:
             table.move_cursor(row=0)
         table.border_title = border_title
@@ -556,9 +657,11 @@ class MainScreen(Screen):
         Die Cosine-Scores liegen fuer die ganze Library ohnehin vor (TOP_N
         ist reine Anzeige-Trunkierung), also zeigen Suchtreffer dieselben
         Score-Spalten wie das Ranking -- sortiert nach Suchrelevanz, nicht
-        nach Score (wer tippt, sucht einen Namen). In der Transition-Ziel-
-        Auswahl zeigt SCORE→A stattdessen den direkten Sprung von der
-        aktuellen Query zum Kandidaten."""
+        nach Score (wer tippt, sucht einen Namen). Mit gepinntem Transition-
+        Ziel B zeigt die Suche die Bridge-Spalten (SCORE→A/→B) -- man muss
+        NICHT abbrechen und neu suchen, nur weil ein Ziel gesetzt ist.
+        Waehrend der Ziel-Auswahl selbst (B noch nicht gewaehlt) zeigt
+        SCORE→A den direkten Sprung von der aktuellen Query zum Kandidaten."""
         self._results_shown = False
         lib = self.library
         q = self.query_track
@@ -574,9 +677,11 @@ class MainScreen(Screen):
         rows = []
         heights = []
         for i, t in enumerate(tracks):
-            cell, height = fmt_track_cell(t)
+            played = t["filepath"] in self.played
+            cell, height = fmt_track_cell(t, played)
             heights.append(height)
-            rows.append((str(i + 1), cell, fmt_bpm_cell(t, None), fmt_key_cell(t, None)))
+            rows.append((fmt_rank_cell(i + 1, played), cell,
+                         fmt_bpm_cell(t, None), fmt_key_cell(t, None)))
         title = f"{len(tracks)} matches" if needle.strip() else f"Library ({len(tracks)} tracks)"
         if self._selecting_target:
             title = f"Select transition target — {title}"
@@ -586,6 +691,43 @@ class MainScreen(Screen):
         """Suchtreffer MIT Score-Spalten (Query gesetzt). Kein harter
         BPM-Filter -- wer nach Namen sucht, will den Track finden, nicht
         eine Filter-Teilmenge davon."""
+        if self.transition_target is not None:
+            # Transition-Modus: Suche bleibt die gleiche Suche, nur mit
+            # Bridge-Spalten (SCORE→A/→B + Slash-BPM/Punkt-Key) statt der
+            # normalen Score-Spalten -- man muss NICHT abbrechen und neu
+            # suchen, nur weil ein Ziel B gepinnt ist.
+            target = self.transition_target
+            by_path = {
+                r["track"]["filepath"]: r
+                for r in rank_bridge(q, target, self.library, bpm_offset=0,
+                                     top=len(self.library.tracks))
+            }
+            rows, heights, shown, results = [], [], [], []
+            for t in tracks:
+                r = by_path.get(t["filepath"])
+                if r is None:  # die Query selbst
+                    continue
+                played = t["filepath"] in self.played
+                shown.append(t)
+                results.append(r)
+                cell, height = fmt_track_cell(t, played)
+                heights.append(height)
+                if t["filepath"] == target["filepath"]:
+                    rank_cell = Text("◆B", style="bold orange1")
+                else:
+                    rank_cell = fmt_rank_cell(len(shown), played)
+                rows.append((
+                    rank_cell,
+                    cell,
+                    fmt_bpm_cell_ab(t, q, target),
+                    fmt_key_cell_ab(t, q, target),
+                    fmt_score_cell(r["score_a"]),
+                    fmt_score_cell(r["score_b"]),
+                ))
+            title = f"{len(shown)} matches — bridging {query_ref(q)} → {track_label(target)}"
+            self._fill_table(BRIDGE_COLUMNS, rows, shown, title, heights, results=results, bridge=True)
+            return
+
         if self._selecting_target:
             # Ziel-Auswahl: direkter Uebergangs-Score von der Query aus,
             # damit man beim Pinnen sieht, wie weit das Ziel weg ist.
@@ -593,10 +735,11 @@ class MainScreen(Screen):
             for i, t in enumerate(tracks):
                 if t["filepath"] == q["filepath"]:
                     continue
+                played = t["filepath"] in self.played
                 shown.append(t)
-                cell, height = fmt_track_cell(t)
+                cell, height = fmt_track_cell(t, played)
                 heights.append(height)
-                rows.append((str(len(shown)), cell, fmt_bpm_cell(t, q),
+                rows.append((fmt_rank_cell(len(shown), played), cell, fmt_bpm_cell(t, q),
                              fmt_key_cell(t, q), fmt_score_cell(pair_score(q, t))))
             title = f"Select transition target — {len(shown)} matches — from A: {query_ref(q)}"
             self._fill_table(TARGET_COLUMNS, rows, shown, title, heights)
@@ -612,12 +755,13 @@ class MainScreen(Screen):
             r = by_path.get(t["filepath"])
             if r is None:  # die Query selbst
                 continue
+            played = t["filepath"] in self.played
             shown.append(t)
             results.append(r)
-            cell, height = fmt_track_cell(t)
+            cell, height = fmt_track_cell(t, played)
             heights.append(height)
             rows.append((
-                str(len(shown)),
+                fmt_rank_cell(len(shown), played),
                 cell,
                 fmt_bpm_cell(t, q),
                 fmt_key_cell(t, q),
@@ -646,11 +790,12 @@ class MainScreen(Screen):
         heights = []
         for i, r in enumerate(results):
             t = r["track"]
+            played = t["filepath"] in self.played
             tracks.append(t)
-            cell, height = fmt_track_cell(t)
+            cell, height = fmt_track_cell(t, played)
             heights.append(height)
             rows.append((
-                str(i + 1),
+                fmt_rank_cell(i + 1, played),
                 cell,
                 fmt_bpm_cell(t, q),
                 fmt_key_cell(t, q),
@@ -674,28 +819,29 @@ class MainScreen(Screen):
         heights = []
         for i, r in enumerate(results):
             t = r["track"]
+            played = t["filepath"] in self.played
             tracks.append(t)
-            cell, height = fmt_track_cell(t)
+            cell, height = fmt_track_cell(t, played)
             heights.append(height)
             # Das Ziel B laeuft selbst als Kandidat mit -- in der Liste
             # bekommt es statt der Ranknummer einen Marker, passend zum
-            # B-Badge in der Transition-Bar.
+            # B-Badge in der Transition-Bar (Vorrang vor dem Gespielt-Haken).
             if t["filepath"] == target["filepath"]:
                 rank_cell = Text("◆B", style="bold orange1")
             else:
-                rank_cell = Text(str(i + 1))
+                rank_cell = fmt_rank_cell(i + 1, played)
             rows.append((
                 rank_cell,
                 cell,
-                fmt_bpm_cell(t, q),
-                fmt_key_cell(t, q),
+                fmt_bpm_cell_ab(t, q, target),
+                fmt_key_cell_ab(t, q, target),
                 fmt_score_cell(r["score_a"]),
                 fmt_score_cell(r["score_b"]),
             ))
         title = f"Bridge candidates ({len(results)})"
         if self.bpm_offset and not results:
             title = "Bridge candidates — 0 matches within BPM filter"
-        self._fill_table(BRIDGE_COLUMNS, rows, tracks, title, heights)
+        self._fill_table(BRIDGE_COLUMNS, rows, tracks, title, heights, results=results, bridge=True)
 
     def _update_detail(self) -> None:
         detail = self.query_one("#detail", Static)
@@ -704,9 +850,12 @@ class MainScreen(Screen):
         if not self._row_tracks or not (0 <= row < len(self._row_tracks)):
             detail.update("[dim]no selection[/]")
         elif self._row_results is not None and row < len(self._row_results):
-            # Ergebnis-Modus: Score-Zerlegung statt roher Mood-Werte --
-            # die stehen als Deltas ohnehin in den Spalten.
-            detail.update(fmt_why_line(self._row_results[row]))
+            # Ergebnis-/Bridge-Modus: Score-Zerlegung statt roher Mood-Werte
+            # -- die stehen als Deltas/Punkte ohnehin in den Spalten.
+            if self._row_bridge:
+                detail.update(fmt_bridge_why_line(self._row_results[row]))
+            else:
+                detail.update(fmt_why_line(self._row_results[row]))
         else:
             detail.update(fmt_detail_line(self._row_tracks[row]))
 
@@ -721,14 +870,18 @@ class MainScreen(Screen):
         Transition fertig und der Modus endet."""
         search = self.query_one(SearchInput)
         if self._selecting_target:
+            # Nur Anvisieren, noch nicht gespielt -- played wird erst
+            # gesetzt, wenn ein Track wirklich Query (A) wird.
             self._selecting_target = False
             self.transition_target = track
             search.placeholder = SEARCH_PLACEHOLDER
         elif (self.transition_target is not None
               and track["filepath"] == self.transition_target["filepath"]):
+            self.played.add(track["filepath"])
             self.transition_target = None
             self.query_track = track
         else:
+            self.played.add(track["filepath"])
             self.query_track = track
         # Label in die System-Zwischenablage (OSC-52, geht durch WSL/SSH) --
         # der natuerliche naechste Handgriff ist die Suche im DJ-Tool.
@@ -779,6 +932,8 @@ class MainScreen(Screen):
             self.action_transition()
         elif key == "ctrl+l":
             self.action_libraries()
+        elif key == "ctrl+g":
+            self.action_map()
         elif key in ("left", "right") and self._results_shown and self.transition_target is None:
             # Energie-Achse im Transition-Modus aus: ihr Ziel-Shifting
             # kollidiert mit dem Brueckenziel zwischen A und B.
@@ -862,6 +1017,42 @@ class MainScreen(Screen):
             self._after_library_change()
 
         self.app.push_screen(LibraryScreen(return_paths=True), done)
+
+    def action_map(self) -> None:
+        """Ctrl+G: 2D-Landkarte der aktiven Libraries als HTML-Datei
+        erzeugen und im Standardbrowser oeffnen -- kein Modal, kein Menue,
+        eine Taste, ein Ergebnis. Rechnet im Subprozess (PaCMAP/UMAP/PCA
+        koennen sekundenlang laufen, das wuerde die TUI sonst einfrieren)."""
+        if not self.library.tracks:
+            self.app.notify("No analyzed tracks yet — press ^a to analyze first.",
+                            severity="warning")
+            return
+        self._run_map()
+
+    @work(exclusive=True, group="map")
+    async def _run_map(self) -> None:
+        status = self.query_one("#status", Static)
+        status.update("[cyan]● creating map …[/]")
+        cmd = [sys.executable, "-u", "-m", "selecta", "map", "--no-open"]
+        for music_dir in self.library.music_dirs:
+            cmd += ["--music-dir", str(music_dir)]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+        out, _ = await proc.communicate()
+        self._update_header()  # Statuszeile wieder auf den normalen Inhalt
+        lines = out.decode("utf-8", "replace").strip().splitlines()
+        if proc.returncode != 0:
+            detail = lines[-1] if lines else f"exit code {proc.returncode}"
+            self.app.notify(f"Map failed: {detail}", severity="error")
+            return
+        path = Path(lines[-1]) if lines else None
+        if path is None or not path.exists():
+            self.app.notify("Map failed: no output written.", severity="error")
+            return
+        from .map import open_in_browser
+        open_in_browser(path)
+        self.app.notify(f"Map written to {path}")
 
     def _after_library_change(self) -> None:
         """Session-Zustand gegen die neue Library abgleichen: Query und

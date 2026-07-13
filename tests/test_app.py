@@ -10,6 +10,7 @@ from selecta.app import (
     ResultsTable,
     SearchInput,
     SelectaApp,
+    Static,
     chip_line,
     fmt_track_cell,
     genre_chip_color,
@@ -530,3 +531,110 @@ async def test_suche_behaelt_bpm_key_der_query_im_titel(app):
         table = screen.query_one(ResultsTable)
         assert "BPM" in str(table.border_title)
         assert "Groove A" in str(table.border_title)
+
+
+async def test_gespielte_tracks_bekommen_haken(app):
+    """Nach dem Waehlen einer Query (und einer zweiten) traegt die
+    Rank-Zelle des ersten Tracks im Filter-Modus einen '✓'-Praefix."""
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = app.screen
+        await pilot.press(*"groove a", "enter")     # Groove A gespielt
+        await pilot.press(*"groove b", "enter")      # Groove B gespielt
+        await pilot.press("escape")                  # zurueck in den Filter-Modus
+        table = screen.query_one(ResultsTable)
+        idx_a = next(i for i, t in enumerate(screen._row_tracks)
+                     if t["filepath"] == "house_a.mp3")
+        idx_untouched = next(i for i, t in enumerate(screen._row_tracks)
+                             if t["filepath"] == "techno.mp3")
+        assert table.get_row_at(idx_a)[0].plain.startswith("✓")
+        assert not table.get_row_at(idx_untouched)[0].plain.startswith("✓")
+
+
+async def test_gespielt_ist_kein_ranking_malus(app):
+    """Das Markieren eines Kandidaten als 'gespielt' veraendert die
+    Ranking-Reihenfolge nicht -- reine Anzeige, kein Score-Einfluss."""
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = app.screen
+        await pilot.press(*"groove a", "enter")
+        order_before = [t["filepath"] for t in screen._row_tracks]
+        screen.played.add("house_b.mp3")
+        screen.show_results()
+        order_after = [t["filepath"] for t in screen._row_tracks]
+        assert order_before == order_after
+
+
+async def test_bridge_zeigt_slash_deltas_und_key_punkte(app):
+    """Brueckenkandidaten zeigen BPM als Slash-Delta ('+n/−n') und Key als
+    zwei Farbpunkte statt vier separater Spalten."""
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = app.screen
+        await pilot.press(*"groove a", "enter")
+        await pilot.press("ctrl+t")
+        await pilot.press(*"hammer", "enter")
+        table = screen.query_one(ResultsTable)
+        idx = next(i for i, t in enumerate(screen._row_tracks)
+                   if t["filepath"] == "house_fast.mp3")
+        row = table.get_row_at(idx)
+        assert "/" in row[2].plain   # BPM-Zelle
+        assert "●" in row[3].plain   # KEY-Zelle
+
+
+async def test_bridge_detailzeile_zeigt_beide_seiten(app):
+    """Die Detail-Zeile im Bridge-Modus zeigt die Score-Zerlegung zu A UND
+    B (fmt_bridge_why_line)."""
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = app.screen
+        await pilot.press(*"groove a", "enter")
+        await pilot.press("ctrl+t")
+        await pilot.press(*"hammer", "enter")
+        detail = str(screen.query_one("#detail", Static).content)
+        assert "→A" in detail
+        assert "→B" in detail
+
+
+async def test_suche_im_transition_modus_zeigt_bridge_spalten(app):
+    """Tippen mit gepinntem Transition-Ziel bricht den Modus NICHT ab --
+    die Suchtreffer zeigen weiterhin SCORE→A/SCORE→B statt der normalen
+    Score-Spalten."""
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = app.screen
+        await pilot.press(*"groove a", "enter")
+        await pilot.press("ctrl+t")
+        await pilot.press(*"hammer", "enter")   # Ziel gepinnt
+        await pilot.press(*"warmup")             # suchen statt Ranking
+        table = screen.query_one(ResultsTable)
+        labels = [str(col.label) for col in table.columns.values()]
+        assert "SCORE→A" in labels
+        assert "SCORE→B" in labels
+        assert screen.transition_target is not None   # Modus nicht verlassen
+        assert table.row_count == 1
+
+
+async def test_ctrl_g_erzeugt_karte_und_oeffnet_browser(app, tmp_path, monkeypatch):
+    """Ctrl+G rechnet die Map im Subprozess (echter Lauf gegen die winzige
+    synthetische Library -- PCA-Fallback ist schnell genug fuer einen
+    Test) und ruft anschliessend open_in_browser() im TUI-Prozess. Der
+    Browser-Aufruf wird gepatcht, damit der Test kein Fenster oeffnet."""
+    opened = []
+    monkeypatch.setattr("selecta.map.open_in_browser", lambda path: opened.append(path))
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = app.screen
+        await pilot.press("ctrl+g")
+        status_during = str(screen.query_one("#status", Static).content)
+        assert "creating map" in status_during
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert len(opened) == 1
+        assert opened[0].name == "selecta_map.html"
+        assert opened[0].exists()
+        assert "creating map" not in str(screen.query_one("#status", Static).content)
+
+
+async def test_ctrl_g_ohne_analysierte_tracks_zeigt_warnung(app, monkeypatch):
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = app.screen
+        screen.library.tracks = []  # Library ohne Embeddings simulieren
+        notifications = []
+        monkeypatch.setattr(app, "notify", lambda msg, **kw: notifications.append(msg))
+        await pilot.press("ctrl+g")
+        assert any("analyze" in msg for msg in notifications)

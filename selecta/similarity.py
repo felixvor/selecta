@@ -347,15 +347,24 @@ def rank_similar(query: dict, library, energy: int = 0, bpm_offset: float = 0.0,
 # Transition (Bruecke von A nach B)
 # ---------------------------------------------------------------------------
 
-def pair_score(track_a: dict, track_b: dict) -> float:
-    """Direkter Uebergangs-Score zwischen zwei konkreten Tracks: Embedding-
-    Cosine minus BPM/Key/Mood-Penalties, ohne Energie-Verschiebung."""
+def pair_score_parts(track_a: dict, track_b: dict) -> dict:
+    """Wie pair_score, aber mit den rohen Einzelterme (cos, bpm_pen, key_pen,
+    mood_dist) statt nur der Summe -- Grundlage der Bridge-Warum-Zeile und
+    der Slash-Zellen (BPM/Key je zu A und zu B)."""
     a, b = track_a["_embedding"], track_b["_embedding"]
     cos = float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
     bpm_pen = relative_bpm_distance(track_a.get("bpm"), track_b.get("bpm"))
     key_pen = harmonic_distance(track_a.get("key"), track_b.get("key"))
     mood_dist = float(np.linalg.norm(mood_vector(track_a) - mood_vector(track_b)))
-    return _combined_score(cos, bpm_pen, key_pen, mood_dist)
+    score = _combined_score(cos, bpm_pen, key_pen, mood_dist)
+    return {"score": score, "cos_sim": cos, "bpm_pen": bpm_pen,
+            "key_pen": key_pen, "mood_dist": mood_dist}
+
+
+def pair_score(track_a: dict, track_b: dict) -> float:
+    """Direkter Uebergangs-Score zwischen zwei konkreten Tracks: Embedding-
+    Cosine minus BPM/Key/Mood-Penalties, ohne Energie-Verschiebung."""
+    return pair_score_parts(track_a, track_b)["score"]
 
 
 def rank_bridge(query: dict, target: dict, library, bpm_offset: float = 0.0, top: int = TOP_N):
@@ -383,10 +392,16 @@ def rank_bridge(query: dict, target: dict, library, bpm_offset: float = 0.0, top
             continue
         if bpm_ceiling is not None and (t_bpm is None or t_bpm > bpm_ceiling):
             continue
+        parts_a = pair_score_parts(query, track)
+        parts_b = pair_score_parts(track, target)
         results.append({
             "track": track,
-            "score_a": pair_score(query, track),
-            "score_b": pair_score(track, target),
+            "score_a": parts_a["score"],
+            "score_b": parts_b["score"],
+            # Einzelterme zu beiden Seiten -- Grundlage der Bridge-Warum-
+            # Zeile ("→A ... →B ...") und der Slash-Zellen.
+            "parts_a": parts_a,
+            "parts_b": parts_b,
             "d_bpm": (t_bpm - q_bpm) if (t_bpm and q_bpm) else None,
         })
     results.sort(key=lambda r: min(r["score_a"], r["score_b"]), reverse=True)
