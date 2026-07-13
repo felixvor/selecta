@@ -306,9 +306,15 @@ def fmt_why_line(result: dict) -> str:
     return "  ".join(parts) + f"   [dim]{result['track']['filepath']}[/]"
 
 
-def query_title(track: dict) -> str:
+def query_ref(track: dict) -> str:
+    """Kurzreferenz auf die Query inkl. BPM/Key -- BPM und Key des aktuellen
+    Tracks sollen auch beim Tippen sichtbar bleiben, nicht nur im Ranking."""
     bpm = track.get("bpm") or "?"
-    return f"Similar to: {track_label(track)}  [{bpm} BPM | {display_key(track)}]"
+    return f"{track_label(track)}  [{bpm} BPM | {display_key(track)}]"
+
+
+def query_title(track: dict) -> str:
+    return f"Similar to: {query_ref(track)}"
 
 
 def fmt_transition_bar(query: dict, target: dict | None, direct: float | None) -> Text:
@@ -592,7 +598,7 @@ class MainScreen(Screen):
                 heights.append(height)
                 rows.append((str(len(shown)), cell, fmt_bpm_cell(t, q),
                              fmt_key_cell(t, q), fmt_score_cell(pair_score(q, t))))
-            title = f"Select transition target — {len(shown)} matches (SCORE→A: jump from current)"
+            title = f"Select transition target — {len(shown)} matches — from A: {query_ref(q)}"
             self._fill_table(TARGET_COLUMNS, rows, shown, title, heights)
             return
 
@@ -620,7 +626,7 @@ class MainScreen(Screen):
                 fmt_delta10(r["d_aggressive"]),
                 fmt_delta10(r["d_valence"]),
             ))
-        title = f"{len(shown)} matches — scored vs. {track_label(q)}"
+        title = f"{len(shown)} matches — scored vs. {query_ref(q)}"
         self._fill_table(RESULT_COLUMNS, rows, shown, title, heights, results=results)
 
     def show_results(self) -> None:

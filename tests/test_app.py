@@ -518,3 +518,15 @@ async def test_zielauswahl_zeigt_direkten_score(app):
         labels = [str(col.label) for col in table.columns.values()]
         assert "SCORE→A" in labels
         assert table.row_count == 1
+
+
+async def test_suche_behaelt_bpm_key_der_query_im_titel(app):
+    """BPM/Key der aktuellen Query bleiben beim Tippen sichtbar (im
+    Border-Titel der Tabelle), nicht nur im Ranking-Modus."""
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = app.screen
+        await pilot.press(*"groove a", "enter")
+        await pilot.press(*"hammer")
+        table = screen.query_one(ResultsTable)
+        assert "BPM" in str(table.border_title)
+        assert "Groove A" in str(table.border_title)
