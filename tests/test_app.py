@@ -610,31 +610,3 @@ async def test_suche_im_transition_modus_zeigt_bridge_spalten(app):
         assert table.row_count == 1
 
 
-async def test_ctrl_g_erzeugt_karte_und_oeffnet_browser(app, tmp_path, monkeypatch):
-    """Ctrl+G rechnet die Map im Subprozess (echter Lauf gegen die winzige
-    synthetische Library -- PCA-Fallback ist schnell genug fuer einen
-    Test) und ruft anschliessend open_in_browser() im TUI-Prozess. Der
-    Browser-Aufruf wird gepatcht, damit der Test kein Fenster oeffnet."""
-    opened = []
-    monkeypatch.setattr("selecta.map.open_in_browser", lambda path: opened.append(path))
-    async with app.run_test(size=(120, 40)) as pilot:
-        screen = app.screen
-        await pilot.press("ctrl+g")
-        status_during = str(screen.query_one("#status", Static).content)
-        assert "creating map" in status_during
-        await app.workers.wait_for_complete()
-        await pilot.pause()
-        assert len(opened) == 1
-        assert opened[0].name == "selecta_map.html"
-        assert opened[0].exists()
-        assert "creating map" not in str(screen.query_one("#status", Static).content)
-
-
-async def test_ctrl_g_ohne_analysierte_tracks_zeigt_warnung(app, monkeypatch):
-    async with app.run_test(size=(120, 40)) as pilot:
-        screen = app.screen
-        screen.library.tracks = []  # Library ohne Embeddings simulieren
-        notifications = []
-        monkeypatch.setattr(app, "notify", lambda msg, **kw: notifications.append(msg))
-        await pilot.press("ctrl+g")
-        assert any("analyze" in msg for msg in notifications)

@@ -25,10 +25,6 @@ A terminal tool for set preparation and live DJing: finds the right next track w
 - **Multiple libraries, one search.** Register your music folders once in
   the launcher, toggle any combination active, and search across all of
   them. Each folder keeps its own analysis CSV and stays portable.
-- **See your library, not just a list.** `Ctrl+G` renders a 2D map of every
-  track's embedding as a self-contained HTML file (dark, zoomable, no
-  server) — a quick way to tell whether you're mixing from one small
-  corner of your collection or the whole thing.
 
 ## Requirements
 
@@ -110,7 +106,6 @@ result** makes it the new query (that's how you walk through a set).
 | `,` `.` | BPM filter: hard cutoff (only faster or slower tracks), each press snaps to the next BPM value present in the library |
 | `Ctrl+A` | Analyze all active libraries in sequence (confirmation → progress + live per-track log: analysis stages while running, then genre/vibe tags and scores per finished track) |
 | `Ctrl+T` | Pin a transition target (fuzzy search + Enter): the list shows bridge tracks between the current query and the target |
-| `Ctrl+G` | Render a 2D map of the active libraries' embeddings and open it in your browser |
 | `Ctrl+L` | Back to the library launcher (switch libraries mid-session) |
 | `Esc` | Clear the search / go back |
 | `Ctrl+C` / `Ctrl+Q` | Quit |
@@ -187,30 +182,6 @@ to see what you've already played without losing it from the list (it's
 still a valid pick, and never penalized in the ranking). This is
 per-session only, nothing is written to disk.
 
-### Library map
-
-![Library map: every track's embedding, plotted](docs/map.png)
-
-`Ctrl+G` (or `selecta map --music-dir DIR [--music-dir DIR2 ...]` headless)
-projects every analyzed track's embedding down to 2D and writes a
-self-contained HTML file — dark background, one glowing dot per track,
-colored by its top genre, sized by BPM. Hover a point for the same info
-the chip line shows (BPM, key, genres, vibes, mood); scroll to zoom,
-drag to pan, double-click to reset. It answers a question the ranking
-list can't: are you circling one small corner of your collection, or
-does your library actually have range? No CDN, no server, no telemetry —
-open the file anywhere.
-
-The projection uses only the raw track embedding, never metadata — genre
-and BPM are colors and tooltips, not part of the geometry, so the map
-stays honest about what's actually *similar-sounding*. By default it
-falls back to a dependency-free PCA; install the optional extra for a
-sharper layout that keeps genuinely separate clusters apart:
-
-```bash
-pip install -e ".[map]"
-```
-
 ## Development
 
 ```bash
@@ -227,6 +198,13 @@ builds a folder of fictional tracks with hand-crafted embedding clusters
 the SVGs to `docs/`. Rerun it after UI changes. `scripts/demo.tape` is the
 matching [VHS](https://github.com/charmbracelet/vhs) script for an animated
 GIF of the same flow.
+
+`selecta map --music-dir DIR [--music-dir DIR2 ...] [--out FILE] [--no-open]`
+is an experimental, CLI-only command: it projects every analyzed track's
+embedding to 2D (PCA by default, or `pip install -e ".[map]"` for a
+PaCMAP/UMAP layout) and writes a self-contained dark HTML page you can open
+in a browser. Not wired into the TUI yet — it needs search/filter and a
+proper legend before it earns a keybinding.
 
 ## Dependencies & license
 

@@ -108,20 +108,18 @@ liegt in `~/.local/share/selecta/libraries.json`.
   (keine Doppelung zur Bar). Bridge-Zellen `fmt_bpm_cell_ab`/
   `fmt_key_cell_ab` (Slash-Delta bzw. zwei Farbpunkte zu A/B, siehe
   Designentscheidungen) und `fmt_bridge_why_line` (Detail-Zeile mit
-  Score-Zerlegung zu beiden Seiten). Ctrl+G (`action_map`/`_run_map`)
-  rechnet die Library-Map als Subprozess (`selecta map --no-open`) und
-  ruft danach `map.open_in_browser()` im TUI-Prozess.
-  CSS inline in `SelectaApp.CSS`.
+  Score-Zerlegung zu beiden Seiten). CSS inline in `SelectaApp.CSS`.
 - **`map.py`** — Library-Map als selbstständige HTML-Datei (kein CDN,
-  Canvas-JS inline, dunkler Hackerlook). `project_2d()`: pacmap > umap >
-  reine-numpy-PCA-Fallback (lazy imports, `pip install selecta[map]` für
-  pacmap — optional, Kern-Installation/Tests laufen ohne). Projiziert
-  wird NUR das L2-normierte Track-Embedding (`Library.matrix`), niemals
-  Metadaten — die sind Anzeige-Kanäle (Farbe = Top-1-Genre über
-  `_genre_color_hex`, eine map.py-eigene Kopie von `app.genre_chip_color`s
-  Hash-Logik, um den Kreisimport mit app.py zu vermeiden; Punktgröße =
-  BPM; Tooltip = Chip-Infos). `write_map()`/`open_in_browser()` von der
-  CLI (`selecta map`) und der TUI (Ctrl+G) genutzt.
+  Canvas-JS inline, dunkler Hackerlook), bewusst **nur als CLI-Gimmick**
+  (`selecta map`), NICHT in die TUI verdrahtet — siehe Designentscheidungen
+  und TODOs. `project_2d()`: pacmap > umap > reine-numpy-PCA-Fallback
+  (lazy imports, `pip install selecta[map]` für pacmap — optional,
+  Kern-Installation/Tests laufen ohne). Projiziert wird NUR das
+  L2-normierte Track-Embedding (`Library.matrix`), niemals Metadaten —
+  die sind Anzeige-Kanäle (Farbe = Top-1-Genre über `_genre_color_hex`,
+  eine map.py-eigene Kopie von `app.genre_chip_color`s Hash-Logik, um
+  einen Kreisimport mit app.py zu vermeiden; Punktgröße = BPM; Tooltip =
+  Chip-Infos).
 - **`scripts/`** — nicht Teil des Pakets: `energy_eval.py` (Diagnose der
   Energie-Achse auf echten Library-CSVs: churn/discovery/direction-Metriken
   über Ranking-Varianten — Grundlage der z-Subspace-Designentscheidung),
@@ -253,12 +251,15 @@ liegt in `~/.local/share/selecta/libraries.json`.
 - **TF-Logging**: `TF_CPP_MIN_LOG_LEVEL` muss VOR jedem Essentia-Import
   gesetzt sein (steht am Modulanfang von `analysis.py`); C++-seitiger
   Lärm wird zusätzlich über `filtered_stderr` weggefiltert.
-- **Library-Map als HTML-Export, nicht im TUI-Prozess**: PaCMAP/UMAP/PCA
-  können sekundenlang laufen, das würde die TUI einfrieren (gleiche
-  Begründung wie beim Analyse-Subprozess) — Ctrl+G startet `python -m
-  selecta map --no-open` als Subprozess, öffnet den Browser erst danach
-  im TUI-Prozess. Bewusst NICHT Ctrl+M (im Terminal byte-identisch mit
-  Enter/CR, nicht unterscheidbar), sondern Ctrl+G.
+- **Library-Map bewusst (noch) nicht in die TUI verdrahtet**: Ctrl+G +
+  `action_map`/`_run_map` gab es kurz, wurde aber wieder ausgebaut — laut
+  Nutzer braucht die Karte erst Suche/Filter nach Artist und eine
+  vernünftige Legende, um wirklich nützlich zu sein, statt nur eine nette
+  Spielerei zu sein. `selecta map` bleibt als CLI-Kommando bestehen
+  (Subprozess-Architektur unverändert richtig: PaCMAP/UMAP/PCA können
+  sekundenlang laufen). Falls die Karte doch in die TUI zurückkommt:
+  NICHT Ctrl+M (im Terminal byte-identisch mit Enter/CR, nicht
+  unterscheidbar) — siehe TODOs für den Rückbau-Stand.
   Projektion läuft NUR über das rohe Track-Embedding, nie über Metadaten
   gemischt — sonst weiß man bei zwei benachbarten Punkten nicht mehr, ob
   sie klanglich nah sind oder nur zufällig dieselbe BPM/Genre haben.
@@ -297,10 +298,21 @@ liegt in `~/.local/share/selecta/libraries.json`.
   nehmen (Library anlegen, analysieren mit Skip zu 100%). Heikel: der
   Launcher liest die ECHTE libraries.json des Nutzers — dafür müsste
   demo.tape mit isoliertem HOME laufen.
-- Demo-GIF nach der Ctrl+G/Bridge-Zellen-Erweiterung noch nicht neu
-  gerendert (auf Nutzerwunsch übersprungen) — vor dem nächsten Release-
-  Push nachholen, sonst zeigt es den alten Transition-Screen ohne
+- Demo-GIF nach der Bridge-Zellen-Erweiterung noch nicht neu gerendert
+  (auf Nutzerwunsch übersprungen) — vor dem nächsten Release-Push
+  nachholen, sonst zeigt es den alten Transition-Screen ohne
   Slash-BPM/Key-Punkte.
+- **Library-Map zurück in die TUI (Backlog, bewusst zurückgestellt):**
+  `selecta map` ist ein CLI-Gimmick, der Nutzer fand die Karte "as-is"
+  noch nicht nützlich genug für eine eigene Taste. Fehlt laut ihm für
+  einen echten Mehrwert: Suche/Filter nach Artist direkt in der
+  HTML-Seite (JS-seitig, kein Server — z.B. ein Textfeld, das Punkte
+  dimmt/hervorhebt), eine bessere farbliche Hervorhebung (aktuell nur
+  Top-1-Genre-Hash, evtl. mehrdeutig bei vielen Genres/Farbkollisionen).
+  Erst wenn das steht, wieder einen Ctrl-Chord in app.py verdrahten
+  (Code-Grundgerüst dafür existierte schon einmal, siehe Git-Historie
+  Commit 89009cc — `action_map`/`_run_map` als Vorlage, falls
+  Wiederverwendung sinnvoll ist).
 - **Order-Set-Idee (Konzept, nicht umgesetzt):** Ctrl+O startet einen
   "Ordering"-Modus — mehrere Tracks (bis N) werden nacheinander
   ausgewählt/abgewählt (Suche/Ranking bleiben nutzbar, orientieren sich
@@ -320,13 +332,16 @@ liegt in `~/.local/share/selecta/libraries.json`.
   abgestimmt werden, bevor hier Code entsteht.
 
 Erledigt (2026-07-13): `IMPLEMENTATION_PLAN.md` (Gespielt-Markierung,
-Library-Map, Transition-Deltas) vollständig umgesetzt — Session-Haken
-für gespielte Tracks (`MainScreen.played`, reine Anzeige); Bridge-Zellen
-kompakt (Slash-BPM, Key-Punkte, `fmt_bridge_why_line`), Suche bleibt im
-Transition-Modus nutzbar; `selecta/map.py` + `selecta map`-Subcommand +
-Ctrl+G (2D-Landkarte der Track-Embeddings, PaCMAP/UMAP/PCA-Fallback,
-kein CDN). 117 Tests grün. Plan-Datei nach Umsetzung entfernt (Zweck
-erfüllt, Details stehen jetzt hier bzw. im Code).
+Library-Map, Transition-Deltas) umgesetzt — Session-Haken für gespielte
+Tracks (`MainScreen.played`, reine Anzeige); Bridge-Zellen kompakt
+(Slash-BPM, Key-Punkte, `fmt_bridge_why_line`), Suche bleibt im
+Transition-Modus nutzbar; `selecta/map.py` + `selecta map`-Subcommand
+(2D-Landkarte der Track-Embeddings, PaCMAP/UMAP/PCA-Fallback, kein CDN).
+Ctrl+G-TUI-Anbindung noch am selben Tag wieder ausgebaut (Nutzer: Karte
+braucht erst Suche/Filter/bessere Farben, siehe Backlog-TODO oben) —
+`selecta map` bleibt als reines CLI-Kommando. 115 Tests grün. Plan-Datei
+nach Umsetzung entfernt (Zweck erfüllt, Details stehen jetzt hier bzw.
+im Code).
 
 Erledigt (2026-07-12): Live-Zähler im Analyselog statt statischem
 "X of Y"-Satz; '? BPM ?'-Bug (Voll-Analyse rechnet BPM/Key jetzt selbst,

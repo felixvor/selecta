@@ -94,9 +94,7 @@ def render_logo() -> Text:
 # -- keine Buchstaben, mit denen ein Titel beginnen koennte.
 ACTION_KEYS = {"left", "right", "comma", "full_stop"}
 # Chords, die IMMER Aktionen ausloesen (fzf-Konvention: Aktionen auf Ctrl).
-# Bewusst NICHT Ctrl+M fuer die Map -- ^M ist im Terminal byte-identisch
-# mit Enter (Carriage Return), Textual kann das nicht unterscheiden.
-CTRL_ACTION_KEYS = {"ctrl+a", "ctrl+t", "ctrl+l", "ctrl+g"}
+CTRL_ACTION_KEYS = {"ctrl+a", "ctrl+t", "ctrl+l"}
 
 FILTER_COLUMNS = ("#", "TRACK", "BPM", "KEY")
 RESULT_COLUMNS = ("#", "TRACK", "BPM", "KEY", "SCORE", "ΔENERG", "ΔHARD", "ΔMOOD")
@@ -542,7 +540,7 @@ class MainScreen(Screen):
         self.query_one("#logo", Static).update(Text(LOGO, style="bold magenta"))
         self.query_one("#keybar", Static).update(
             "[b]Enter[/b] select+copy  [b]↑↓[/b] navigate  [b]←→[/b] energy  [b],[/b][b].[/b] BPM filter  "
-            "[b]^a[/b] analyze  [b]^t[/b] transition  [b]^g[/b] map  [b]^l[/b] libraries  [b]Esc[/b] clear  [b]^c[/b] quit"
+            "[b]^a[/b] analyze  [b]^t[/b] transition  [b]^l[/b] libraries  [b]Esc[/b] clear  [b]^c[/b] quit"
         )
         self._update_header()
         self.refresh_status()
@@ -932,8 +930,6 @@ class MainScreen(Screen):
             self.action_transition()
         elif key == "ctrl+l":
             self.action_libraries()
-        elif key == "ctrl+g":
-            self.action_map()
         elif key in ("left", "right") and self._results_shown and self.transition_target is None:
             # Energie-Achse im Transition-Modus aus: ihr Ziel-Shifting
             # kollidiert mit dem Brueckenziel zwischen A und B.
@@ -1017,42 +1013,6 @@ class MainScreen(Screen):
             self._after_library_change()
 
         self.app.push_screen(LibraryScreen(return_paths=True), done)
-
-    def action_map(self) -> None:
-        """Ctrl+G: 2D-Landkarte der aktiven Libraries als HTML-Datei
-        erzeugen und im Standardbrowser oeffnen -- kein Modal, kein Menue,
-        eine Taste, ein Ergebnis. Rechnet im Subprozess (PaCMAP/UMAP/PCA
-        koennen sekundenlang laufen, das wuerde die TUI sonst einfrieren)."""
-        if not self.library.tracks:
-            self.app.notify("No analyzed tracks yet — press ^a to analyze first.",
-                            severity="warning")
-            return
-        self._run_map()
-
-    @work(exclusive=True, group="map")
-    async def _run_map(self) -> None:
-        status = self.query_one("#status", Static)
-        status.update("[cyan]● creating map …[/]")
-        cmd = [sys.executable, "-u", "-m", "selecta", "map", "--no-open"]
-        for music_dir in self.library.music_dirs:
-            cmd += ["--music-dir", str(music_dir)]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        )
-        out, _ = await proc.communicate()
-        self._update_header()  # Statuszeile wieder auf den normalen Inhalt
-        lines = out.decode("utf-8", "replace").strip().splitlines()
-        if proc.returncode != 0:
-            detail = lines[-1] if lines else f"exit code {proc.returncode}"
-            self.app.notify(f"Map failed: {detail}", severity="error")
-            return
-        path = Path(lines[-1]) if lines else None
-        if path is None or not path.exists():
-            self.app.notify("Map failed: no output written.", severity="error")
-            return
-        from .map import open_in_browser
-        open_in_browser(path)
-        self.app.notify(f"Map written to {path}")
 
     def _after_library_change(self) -> None:
         """Session-Zustand gegen die neue Library abgleichen: Query und
